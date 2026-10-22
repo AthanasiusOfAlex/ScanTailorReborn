@@ -77,7 +77,8 @@ let package = Package(
             name: "ScanTailorCoreTests",
             dependencies: [
                 "ScanTailorContracts",
-                "ScanTailorCore"
+                "ScanTailorCore",
+                "ScanTailorPortableBackend"
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
