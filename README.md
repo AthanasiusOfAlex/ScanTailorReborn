@@ -219,6 +219,12 @@ Sources/
 
 ---
 
+## Documentation & Research
+
+- [**Technical White Paper**](docs/WHITE_PAPER.md): Comprehensive real-world evaluation, algorithmic case study (*Flannery 1993*), mathematical analysis of layout/confidence metrics, and architectural roadmap for font deduplication, configurable publication margins, and multi-lingual Tesseract OCR (Ancient Greek).
+
+---
+
 ## License
 
 This project is licensed under the [MIT License](LICENCE.md).
