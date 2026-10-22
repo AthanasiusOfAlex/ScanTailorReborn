@@ -97,5 +97,18 @@ let package = Package(
                 .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
+        .testTarget(
+            name: "ScanTailorAppleBackendTests",
+            dependencies: [
+                "ScanTailorContracts",
+                "ScanTailorCore",
+                "ScanTailorPortableBackend",
+                "ScanTailorAppleBackend"
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
     ]
 )
