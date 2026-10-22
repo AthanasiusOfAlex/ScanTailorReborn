@@ -25,6 +25,10 @@ let package = Package(
             name: "ScanTailorAppleBackend",
             targets: ["ScanTailorAppleBackend"]
         ),
+        .library(
+            name: "ScanTailorPipeline",
+            targets: ["ScanTailorPipeline"]
+        ),
     ],
     targets: [
         .target(
@@ -37,6 +41,17 @@ let package = Package(
         .target(
             name: "ScanTailorCore",
             dependencies: ["ScanTailorContracts"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
+        .target(
+            name: "ScanTailorPipeline",
+            dependencies: [
+                "ScanTailorContracts",
+                "ScanTailorCore"
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .enableUpcomingFeature("StrictConcurrency")
@@ -78,6 +93,7 @@ let package = Package(
             dependencies: [
                 "ScanTailorContracts",
                 "ScanTailorCore",
+                "ScanTailorPipeline",
                 "ScanTailorPortableBackend"
             ],
             swiftSettings: [
