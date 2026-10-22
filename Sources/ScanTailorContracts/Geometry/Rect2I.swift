@@ -54,6 +54,10 @@ public struct Rect2I: Sendable, Equatable, Hashable, Codable {
         width <= 0 || height <= 0
     }
 
+    public var area: Int {
+        width * height
+    }
+
     public var origin: Point2I {
         Point2I(x: x, y: y)
     }
