@@ -42,6 +42,48 @@ struct ContentBoxAndMarginTests {
         #expect(!result.rejectedBoxes.isEmpty)
     }
 
+    @Test("Split-edge exclusion zone masks residual spine crease prior to morphological closing on sliced sub-pages")
+    func testSplitBoundaryNoiseExclusionZonePreventsCreaseBridging() throws {
+        let width = 1200
+        let height = 1800
+        let detector = ContentBoxDetector(
+            configuration: ContentBoxDetector.Configuration(
+                cleanBordersFirst: false,
+                splitEdgeExclusionFraction: 0.04 // 48 px exclusion strip on cut edge
+            )
+        )
+
+        // 1. Right Recto slice (inner cut edge on LEFT, x in 0..<48):
+        // Place residual spine crease fragments at x = 10..42 (and a thick vertical crease sliver reaching x = 58),
+        // with body text starting at x = 90 (only 32..48 px away, well within closeBrick's 64 px horizontal span).
+        var rectoBitmap = BinaryBitmap(width: width, height: height, initialBlack: false)
+        fillSolidRect(&rectoBitmap, rect: Rect2I(x: 10, y: 120, width: 48, height: 1500))
+        for lineY in stride(from: 280, through: 1456, by: 42) {
+            fillTextBlock(&rectoBitmap, rect: Rect2I(x: 90, y: lineY, width: 760, height: 24))
+        }
+
+        let rectoResult = detector.detect(in: rectoBitmap, dpi: 600, splitSide: .rightRecto)
+        let rectoBox = try #require(rectoResult.contentBox)
+        #expect(abs(rectoBox.minX - 90) <= 2)
+        #expect(abs(rectoBox.maxX - 850) <= 6)
+        #expect(!rectoResult.rejectedBoxes.isEmpty)
+
+        // 2. Left Verso slice (inner cut edge on RIGHT, x in 1152..<1200):
+        // Place residual spine crease at x = 1142..1190, with body text ending at x = 1110
+        // (only 32 px gap from the crease, within closeBrick's 64 px bridging span).
+        var versoBitmap = BinaryBitmap(width: width, height: height, initialBlack: false)
+        fillSolidRect(&versoBitmap, rect: Rect2I(x: 1142, y: 120, width: 48, height: 1500))
+        for lineY in stride(from: 280, through: 1456, by: 42) {
+            fillTextBlock(&versoBitmap, rect: Rect2I(x: 350, y: lineY, width: 760, height: 24))
+        }
+
+        let versoResult = detector.detect(in: versoBitmap, dpi: 600, splitSide: .leftVerso)
+        let versoBox = try #require(versoResult.contentBox)
+        #expect(abs(versoBox.minX - 350) <= 2)
+        #expect(abs(versoBox.maxX - 1110) <= 6)
+        #expect(!versoResult.rejectedBoxes.isEmpty)
+    }
+
     @Test("MarginHarmonizer enforces 3-tier placement (fullBody, edgeAnchoredPartial sinkage, standaloneFloating) and Pass 2 smudge rejection")
     func testMarginHarmonizerThreeTierPlacementAndPass2OutlierTrimming() {
         let pageSize = Size2I(width: 1200, height: 1800)

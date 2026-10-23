@@ -390,7 +390,11 @@ public struct BookPipelineCoordinator: Sendable {
                 }
 
                 // 1c. Pass 1 Content Box Detection (or manual override)
-                var detection = contentDetector.detect(in: finalCleaned, dpi: configuration.processingDPI)
+                var detection = contentDetector.detect(
+                    in: finalCleaned,
+                    dpi: configuration.processingDPI,
+                    splitSide: slice.side
+                )
                 if let customBox = manualOverride?.overrideContentBox {
                     let customCluster = ContentBoxDetector.Cluster(
                         exactBounds: customBox,

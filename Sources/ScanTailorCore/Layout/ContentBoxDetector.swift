@@ -15,6 +15,9 @@ public struct ContentBoxDetector: Sendable {
         public var closingBrickHeightAt600DPI: Int
         /// Outer page margin fraction (`[0, 0.2]`) treated as the peripheral noise danger zone.
         public var outerEdgeMarginFraction: Double
+        /// Inner split-edge exclusion zone fraction (`[0, 0.25]`, default `0.04`, i.e., 4% of slice width)
+        /// masked prior to morphological closing on sliced sub-pages (`.leftVerso` right edge, `.rightRecto` left edge).
+        public var splitEdgeExclusionFraction: Double
         /// Minimum foreground pixel count in the original bitmap for a cluster in the central zone to be retained.
         public var minClusterForegroundPixelsAt600DPI: Int
         /// Maximum vertical gap (as a fraction of page height) between the main text block and
@@ -29,6 +32,7 @@ public struct ContentBoxDetector: Sendable {
             closingBrickWidthAt600DPI: Int = 64,
             closingBrickHeightAt600DPI: Int = 14,
             outerEdgeMarginFraction: Double = 0.035,
+            splitEdgeExclusionFraction: Double = 0.04,
             minClusterForegroundPixelsAt600DPI: Int = 36,
             maxHeaderFooterGapFraction: Double = 0.14,
             headerFooterHorizontalToleranceFraction: Double = 0.04
@@ -37,6 +41,7 @@ public struct ContentBoxDetector: Sendable {
             self.closingBrickWidthAt600DPI = max(8, closingBrickWidthAt600DPI)
             self.closingBrickHeightAt600DPI = max(2, closingBrickHeightAt600DPI)
             self.outerEdgeMarginFraction = min(max(0.0, outerEdgeMarginFraction), 0.25)
+            self.splitEdgeExclusionFraction = min(max(0.0, splitEdgeExclusionFraction), 0.25)
             self.minClusterForegroundPixelsAt600DPI = max(4, minClusterForegroundPixelsAt600DPI)
             self.maxHeaderFooterGapFraction = min(max(0.02, maxHeaderFooterGapFraction), 0.35)
             self.headerFooterHorizontalToleranceFraction = min(max(0.0, headerFooterHorizontalToleranceFraction), 0.20)
@@ -92,7 +97,16 @@ public struct ContentBoxDetector: Sendable {
 
     /// Pass 1: Detects the page's content bounding box and separates true text/headers/page numbers
     /// from marginal noise.
-    public func detect(in bitmap: borrowing BinaryBitmap, dpi: Int = 600) -> DetectionResult {
+    /// - Parameters:
+    ///   - bitmap: Source 1-bit monochrome bitmap.
+    ///   - dpi: Scan resolution in DPI (default: `600`).
+    ///   - splitSide: Sliced page side (`.single`, `.leftVerso`, or `.rightRecto`). When `.leftVerso`
+    ///     or `.rightRecto`, applies a pre-morphological exclusion mask along the inner cut margin.
+    public func detect(
+        in bitmap: borrowing BinaryBitmap,
+        dpi: Int = 600,
+        splitSide: PageSide = .single
+    ) -> DetectionResult {
         let width = bitmap.width
         let height = bitmap.height
         guard width > 4 && height > 4 else {
@@ -108,12 +122,89 @@ public struct ContentBoxDetector: Sendable {
         let scale = Double(max(72, dpi)) / 600.0
         let areaScale = scale * scale
 
-        let cleaned: BinaryBitmap
+        let initialCleaned: BinaryBitmap
         if configuration.cleanBordersFirst {
             let cleaner = BorderAndSpeckleCleaner()
-            cleaned = cleaner.clean(bitmap)
+            initialCleaned = cleaner.clean(bitmap)
         } else {
-            cleaned = copy bitmap
+            initialCleaned = copy bitmap
+        }
+
+        // Pre-morphological split-edge exclusion mask:
+        // On sliced sub-pages (.leftVerso inner right margin, .rightRecto inner left margin),
+        // mask out the inner split-edge exclusion zone and any residual vertical crease slivers
+        // hugging the cut boundary prior to morphological closing (`closeBrick`).
+        let splitExclusionWidth: Int
+        if splitSide == .single || configuration.splitEdgeExclusionFraction <= 0.0 {
+            splitExclusionWidth = 0
+        } else {
+            splitExclusionWidth = min(
+                width / 4,
+                max(1, Int((Double(width) * configuration.splitEdgeExclusionFraction).rounded()))
+            )
+        }
+
+        var cleaned = initialCleaned
+        var splitEdgeRejectedBoxes: [Rect2I] = []
+
+        if splitExclusionWidth > 0 {
+            let stripRect: Rect2I
+            switch splitSide {
+            case .rightRecto:
+                stripRect = Rect2I(minX: 0, minY: 0, maxX: splitExclusionWidth, maxY: height)
+            case .leftVerso:
+                stripRect = Rect2I(minX: width - splitExclusionWidth, minY: 0, maxX: width, maxY: height)
+            case .single:
+                stripRect = Rect2I(minX: 0, minY: 0, maxX: 0, maxY: 0)
+            }
+
+            let stripCrop = cleaned.cropped(to: stripRect)
+            if !stripCrop.isEmpty {
+                let stripComponents = ConnectedComponentAnalyzer.extractComponents(from: stripCrop, connectivity: .eight)
+                for comp in stripComponents where comp.pixelCount >= 4 {
+                    let box = Rect2I(
+                        minX: stripRect.minX + comp.boundingBox.minX,
+                        minY: stripRect.minY + comp.boundingBox.minY,
+                        maxX: stripRect.minX + comp.boundingBox.maxX,
+                        maxY: stripRect.minY + comp.boundingBox.maxY
+                    )
+                    splitEdgeRejectedBoxes.append(box)
+                }
+
+                for y in 0..<height {
+                    for x in stripRect.minX..<stripRect.maxX {
+                        cleaned[x, y] = false
+                    }
+                }
+
+                // Also erase any residual tall vertical crease sliver hugging the split-mask boundary
+                // (e.g. when a thick or slightly tilted spine crease extended past splitExclusionWidth).
+                let maxSliverWidth = max(24, splitExclusionWidth)
+                let minSliverHeight = max(48, height / 15)
+                var sliverBoxes: [Rect2I] = []
+                cleaned = ConnectedComponentAnalyzer.filterComponents(in: cleaned, connectivity: .eight) { comp in
+                    let bbox = comp.boundingBox
+                    let hugsCutBoundary: Bool
+                    switch splitSide {
+                    case .rightRecto:
+                        hugsCutBoundary = bbox.minX <= splitExclusionWidth + 2
+                    case .leftVerso:
+                        hugsCutBoundary = bbox.maxX >= width - splitExclusionWidth - 2
+                    case .single:
+                        hugsCutBoundary = false
+                    }
+                    let isVerticalCreaseSliver = hugsCutBoundary
+                        && bbox.width <= maxSliverWidth
+                        && bbox.height >= minSliverHeight
+                        && bbox.height > bbox.width * 3
+                    if isVerticalCreaseSliver {
+                        sliverBoxes.append(bbox)
+                        return false
+                    }
+                    return true
+                }
+                splitEdgeRejectedBoxes.append(contentsOf: sliverBoxes)
+            }
         }
 
         // Extract fine connected components from the cleaned bitmap so we can compute exact bounds
@@ -124,7 +215,7 @@ public struct ContentBoxDetector: Sendable {
                 contentBox: nil,
                 mainBodyBox: nil,
                 retainedClusters: [],
-                rejectedBoxes: [],
+                rejectedBoxes: splitEdgeRejectedBoxes,
                 confidence: 1.0
             )
         }
@@ -169,7 +260,7 @@ public struct ContentBoxDetector: Sendable {
                 contentBox: nil,
                 mainBodyBox: nil,
                 retainedClusters: [],
-                rejectedBoxes: [],
+                rejectedBoxes: splitEdgeRejectedBoxes,
                 confidence: 1.0
             )
         }
@@ -177,10 +268,12 @@ public struct ContentBoxDetector: Sendable {
         let minClusterPx = max(4, Int((Double(configuration.minClusterForegroundPixelsAt600DPI) * areaScale).rounded()))
         let edgeMarginX = Int((Double(width) * configuration.outerEdgeMarginFraction).rounded())
         let edgeMarginY = Int((Double(height) * configuration.outerEdgeMarginFraction).rounded())
+        let leftEdgeMarginX = (splitSide == .rightRecto) ? max(edgeMarginX, splitExclusionWidth) : edgeMarginX
+        let rightEdgeMarginX = (splitSide == .leftVerso) ? max(edgeMarginX, splitExclusionWidth) : edgeMarginX
         let interiorRect = Rect2I(
-            minX: edgeMarginX,
+            minX: leftEdgeMarginX,
             minY: edgeMarginY,
-            maxX: max(edgeMarginX + 1, width - edgeMarginX),
+            maxX: max(leftEdgeMarginX + 1, width - rightEdgeMarginX),
             maxY: max(edgeMarginY + 1, height - edgeMarginY)
         )
 
@@ -195,7 +288,7 @@ public struct ContentBoxDetector: Sendable {
         for cluster in allClusters {
             let box = cluster.exactBounds
             let isInInterior = interiorRect.intersection(box) != nil
-            let touchesOuterX = box.minX <= edgeMarginX / 2 || box.maxX >= width - (edgeMarginX / 2)
+            let touchesOuterX = box.minX <= leftEdgeMarginX / 2 || box.maxX >= width - (rightEdgeMarginX / 2)
             let isTallThinBorderLine = touchesOuterX && box.height > box.width * 6 && box.width < max(12, width / 40)
 
             // Also check if a cluster sits entirely in the extreme outer margin strip
@@ -224,7 +317,7 @@ public struct ContentBoxDetector: Sendable {
                 contentBox: nil,
                 mainBodyBox: nil,
                 retainedClusters: [],
-                rejectedBoxes: allClusters.map(\.exactBounds),
+                rejectedBoxes: splitEdgeRejectedBoxes + allClusters.map(\.exactBounds),
                 confidence: 0.9
             )
         }
@@ -249,7 +342,7 @@ public struct ContentBoxDetector: Sendable {
         let horizTol = Int((Double(width) * configuration.headerFooterHorizontalToleranceFraction).rounded())
 
         var retainedBody: [Cluster] = []
-        var rejectedBoxes: [Rect2I] = []
+        var rejectedBoxes: [Rect2I] = splitEdgeRejectedBoxes
 
         for cluster in bodyCandidates {
             let box = cluster.exactBounds
@@ -277,7 +370,7 @@ public struct ContentBoxDetector: Sendable {
 
         if retainedBody.isEmpty {
             retainedBody = bodyCandidates
-            rejectedBoxes.removeAll()
+            rejectedBoxes = splitEdgeRejectedBoxes
         }
 
         var mainBodyBox = retainedBody[0].exactBounds
