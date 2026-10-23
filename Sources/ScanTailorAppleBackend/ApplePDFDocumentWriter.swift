@@ -17,6 +17,7 @@ public struct ApplePDFDocumentWriter: PDFDocumentWriter, ~Copyable {
     public private(set) var pageCount: Int = 0
 
     private let pdfContext: CGContext
+    private let baseOCRFont: CTFont
     private var isFinalized: Bool = false
 
     /// Creates a new PDF document writer targeting `destinationURL`.
@@ -59,6 +60,7 @@ public struct ApplePDFDocumentWriter: PDFDocumentWriter, ~Copyable {
 
         self.destinationURL = destinationURL
         self.pdfContext = context
+        self.baseOCRFont = CTFontCreateWithName("Helvetica" as CFString, 12.0, nil)
     }
 
     /// Appends a 1-bit monochrome page with an invisible searchable OCR text layer.
@@ -179,10 +181,10 @@ public struct ApplePDFDocumentWriter: PDFDocumentWriter, ~Copyable {
 
             guard pdfWidth > 0.5 && pdfHeight > 0.5 else { continue }
 
-            let fontSize = max(1.0, CGFloat(pdfHeight) * 0.85)
-            let font = CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
+            // Deduplicate font objects in the generated PDF: use a single base CTFont (12 pt Helvetica)
+            // and apply vertical (font size) & horizontal (bounding box fitting) scaling via CGAffineTransform textMatrix.
             let attributes: [CFString: Any] = [
-                kCTFontAttributeName: font
+                kCTFontAttributeName: baseOCRFont
             ]
             guard let attributedString = CFAttributedStringCreate(
                 kCFAllocatorDefault,
@@ -198,19 +200,23 @@ public struct ApplePDFDocumentWriter: PDFDocumentWriter, ~Copyable {
             var leading: CGFloat = 0
             let naturalWidth = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
 
+            let targetHeight = CGFloat(pdfHeight) * 0.85
+            let verticalScale = max(0.1, targetHeight / 12.0)
+            let scaledNaturalWidth = naturalWidth * verticalScale
+
             let horizontalScale: CGFloat
-            if naturalWidth > 0.1 {
-                horizontalScale = CGFloat(pdfWidth) / naturalWidth
+            if scaledNaturalWidth > 0.1 {
+                horizontalScale = (CGFloat(pdfWidth) / scaledNaturalWidth) * verticalScale
             } else {
-                horizontalScale = 1.0
+                horizontalScale = verticalScale
             }
 
-            let baselineY = CGFloat(pdfY) + max(0, descent)
+            let baselineY = CGFloat(pdfY) + max(0, descent * verticalScale)
             pdfContext.textMatrix = CGAffineTransform(
                 a: horizontalScale,
                 b: 0,
                 c: 0,
-                d: 1.0,
+                d: verticalScale,
                 tx: CGFloat(pdfX),
                 ty: baselineY
             )
