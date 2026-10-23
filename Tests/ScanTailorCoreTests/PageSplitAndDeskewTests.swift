@@ -214,12 +214,75 @@ struct PageSplitAndDeskewTests {
             let decision = PageSplitEstimator.estimateSplit(in: spread, mode: .automatic)
             #expect(decision.layoutType == .twoPageSpread)
             let splitLine = try #require(decision.splitLine)
+            #expect(splitLine.isDarkCrease == darkShadow)
+            if darkShadow {
+                #expect(decision.confidence >= 0.80)
+            }
             let errorPx = abs(splitLine.centerX - targetCenterX)
             #expect(
                 errorPx <= twoMillimetersInPixels,
                 "Expected gutter center within \(twoMillimetersInPixels) px (±2 mm) of \(targetCenterX), got \(splitLine.centerX) (error: \(errorPx) px)"
             )
         }
+    }
+
+    @Test("PageSplitEstimator tracks wide halftoned dark spine crease midline without rolling onto margin flanks")
+    func wideStippledDarkCreaseCenterlineTracking() throws {
+        let width = 1600
+        let height = 1100
+        let targetCenterX = 816.0
+        let targetTilt = -0.75
+        let halfH = Double(height) * 0.5
+        let tanPhi = tan(targetTilt * .pi / 180.0)
+
+        var buffer = GrayscaleBuffer(width: width, height: height, dpi: 300, initialValue: 244)
+
+        // Asymmetric text margins around the crease (wider right white margin than left white margin)
+        // so that a White Valley optimizer would roll off to the right flank (+25..+40 px),
+        // whereas Dark Crease Mode must lock onto the crease centroid within ±6 px.
+        var y = 110
+        while y < height - 110 {
+            let lineThickness = 6
+            let gx = Int((targetCenterX - (Double(y) - halfH) * tanPhi).rounded())
+            for dy in 0..<lineThickness where (y + dy) < height {
+                let leftStart = 120
+                let leftEnd = max(leftStart + 20, gx - 55)
+                for x in leftStart..<leftEnd where (x % 9) != 0 {
+                    buffer[x, y + dy] = 28
+                }
+                let rightStart = min(width - 140, gx + 95)
+                let rightEnd = width - 120
+                for x in rightStart..<rightEnd where (x % 9) != 0 {
+                    buffer[x, y + dy] = 28
+                }
+            }
+            y += 22
+        }
+
+        // Draw a 36 px wide stippled/halftoned dark spine shadow centered on gx(y).
+        let creaseHalfWidth = 18
+        for row in 0..<height {
+            let gx = targetCenterX - (Double(row) - halfH) * tanPhi
+            let minX = max(0, Int(gx.rounded()) - creaseHalfWidth)
+            let maxX = min(width - 1, Int(gx.rounded()) + creaseHalfWidth)
+            for x in minX...maxX {
+                let dist = abs(Double(x) - gx) / Double(creaseHalfWidth)
+                // Dense dark core with 1-bit stipple pattern toward edges
+                let isStippleDark = ((x + row) % 2 == 0) || dist < 0.45
+                if isStippleDark {
+                    let shade = UInt8(clamping: Int(30.0 + 150.0 * dist * dist))
+                    buffer[x, row] = min(buffer[x, row], shade)
+                }
+            }
+        }
+
+        let decision = PageSplitEstimator.estimateSplit(in: buffer, mode: .automatic)
+        #expect(decision.layoutType == .twoPageSpread)
+        #expect(decision.confidence >= 0.80)
+        let splitLine = try #require(decision.splitLine)
+        #expect(splitLine.isDarkCrease == true)
+        #expect(abs(splitLine.centerX - targetCenterX) <= 6.0)
+        #expect(abs(splitLine.tiltDegrees - targetTilt) <= 0.6)
     }
 
     @Test("PageSplitEstimator handles tilted spread and masks cross-gutter bleed during split")

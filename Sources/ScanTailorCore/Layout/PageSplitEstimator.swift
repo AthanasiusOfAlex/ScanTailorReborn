@@ -30,11 +30,33 @@ public struct GutterSplitLine: Sendable, Equatable, Codable {
     public let centerX: Double
     public let normalizedCenterX: Double
     public let tiltDegrees: Double
+    public let isDarkCrease: Bool
 
-    public init(centerX: Double, normalizedCenterX: Double, tiltDegrees: Double = 0.0) {
+    public init(
+        centerX: Double,
+        normalizedCenterX: Double,
+        tiltDegrees: Double = 0.0,
+        isDarkCrease: Bool = false
+    ) {
         self.centerX = centerX
         self.normalizedCenterX = normalizedCenterX
         self.tiltDegrees = tiltDegrees
+        self.isDarkCrease = isDarkCrease
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case centerX
+        case normalizedCenterX
+        case tiltDegrees
+        case isDarkCrease
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.centerX = try container.decode(Double.self, forKey: .centerX)
+        self.normalizedCenterX = try container.decode(Double.self, forKey: .normalizedCenterX)
+        self.tiltDegrees = try container.decode(Double.self, forKey: .tiltDegrees)
+        self.isDarkCrease = try container.decodeIfPresent(Bool.self, forKey: .isDarkCrease) ?? false
     }
 
     @inlinable
@@ -153,11 +175,23 @@ public struct PageSplitEstimator: Sendable {
             }
         }
 
-        // Compute dark spine crease contrast per (band, x): compares narrow center darkness to flanking background.
+        // Compute dark spine crease contrast and vertical continuity per (band, x).
         // A true spine shadow/crease is vertically continuous across most rows of the band (including inter-line spaces),
         // whereas text columns only darken the rows occupied by horizontal text strokes.
+        // We use a 3x3 smoothed center luminance to bridge 1-bit halftone stipple dots while preserving inter-line whitespace,
+        // and multi-offset symmetric paper flanks to handle both narrow rules and wider shadows.
         var bandSpineContrast = [Double](repeating: 0.0, count: bandCount * w)
-        let flankOffset = max(4, min(24, w / 25))
+        var bandDarkContinuity = [Double](repeating: 0.0, count: bandCount * w)
+        var bandCreaseCenter = [Double](repeating: 0.0, count: bandCount * w)
+        var bandCreaseOffset = [Double](repeating: 1.0, count: bandCount * w)
+        var bandCreaseLeft = [Int](repeating: 0, count: bandCount * w)
+        var bandCreaseRight = [Int](repeating: 0, count: bandCount * w)
+
+        let d1 = max(4, w / 60)
+        let d2 = max(8, w / 32)
+        let d3 = max(14, min(36, w / 18))
+        let maxCreaseWidth = max(6, w / 14)
+
         working.pixels.withUnsafeBufferPointer { pixels in
             let stride = working.rowBytes
             for b in 0..<bandCount {
@@ -165,36 +199,79 @@ public struct PageSplitEstimator: Sendable {
                 let by1 = min(h, max(by0 + 1, yStart + ((b + 1) * activeHeight) / bandCount))
                 let rowCount = max(1, by1 - by0)
                 let rows = Double(rowCount)
-                for x in flankOffset..<(w - flankOffset) {
-                    var centerSum = 0
-                    var leftFlankSum = 0
-                    var rightFlankSum = 0
+                let rowOffset = b * w
+                var rawContrast = [Double](repeating: 0.0, count: w)
+
+                for x in d3..<(w - d3) {
+                    var dipSum = 0.0
                     var darkRowCount = 0
                     for y in by0..<by1 {
-                        let rowBase = y * stride
-                        let cVal = Int(pixels[rowBase + x])
-                        let lVal = Int(pixels[rowBase + x - flankOffset])
-                        let rVal = Int(pixels[rowBase + x + flankOffset])
-                        centerSum += cVal
-                        leftFlankSum += lVal
-                        rightFlankSum += rVal
-                        let rowFlank = (lVal + rVal) / 2
-                        if rowFlank - cVal >= 14 {
+                        let yPrev = max(0, y - 1) * stride
+                        let yCurr = y * stride
+                        let yNext = min(h - 1, y + 1) * stride
+
+                        let rPrev = Int(pixels[yPrev + x - 1]) + 2 * Int(pixels[yPrev + x]) + Int(pixels[yPrev + x + 1])
+                        let rCurr = Int(pixels[yCurr + x - 1]) + 2 * Int(pixels[yCurr + x]) + Int(pixels[yCurr + x + 1])
+                        let rNext = Int(pixels[yNext + x - 1]) + 2 * Int(pixels[yNext + x]) + Int(pixels[yNext + x + 1])
+                        let cSmooth = Double(rPrev + 2 * rCurr + rNext) / 16.0
+
+                        let lPaper = max(Int(pixels[yCurr + x - d1]), max(Int(pixels[yCurr + x - d2]), Int(pixels[yCurr + x - d3])))
+                        let rPaper = max(Int(pixels[yCurr + x + d1]), max(Int(pixels[yCurr + x + d2]), Int(pixels[yCurr + x + d3])))
+                        let symFlank = Double(min(lPaper, rPaper))
+                        let dip = max(0.0, symFlank - cSmooth)
+                        dipSum += dip
+
+                        let hasBinaryInk = binary[x - 1, y] || binary[x, y] || binary[x + 1, y]
+                        if dip >= 8.0 || (hasBinaryInk && symFlank >= 180.0 && dip >= 5.0) {
                             darkRowCount += 1
                         }
                     }
-                    // Require vertical continuity (>= 75% of rows in the band darkened) so periodic text lines
-                    // are never mistaken for a continuous vertical spine shadow.
-                    guard darkRowCount * 4 >= rowCount * 3 else { continue }
-                    let centerMean = Double(centerSum) / rows
-                    let flankMean = Double(leftFlankSum + rightFlankSum) / (2.0 * rows)
-                    let dip = max(0.0, flankMean - centerMean)
-                    bandSpineContrast[b * w + x] = dip
+
+                    let continuity = Double(darkRowCount) / rows
+                    let meanDip = dipSum / rows
+                    bandDarkContinuity[rowOffset + x] = continuity
+                    if continuity >= 0.70 && meanDip >= 8.0 {
+                        rawContrast[x] = meanDip * continuity
+                    }
+                }
+
+                // Identify contiguous dark crease runs in this band and compute intensity-weighted centroid mu_b.
+                var x = d3
+                while x < w - d3 {
+                    if rawContrast[x] > 0.0 {
+                        let runStart = x
+                        var runEnd = x
+                        while runEnd + 1 < w - d3 && rawContrast[runEnd + 1] > 0.0 {
+                            runEnd += 1
+                        }
+                        let runWidth = runEnd - runStart + 1
+                        if runWidth <= maxCreaseWidth {
+                            var weightedSum = 0.0
+                            var weightTotal = 0.0
+                            for u in runStart...runEnd {
+                                let wVal = rawContrast[u]
+                                weightedSum += Double(u) * wVal
+                                weightTotal += wVal
+                            }
+                            let mu = weightTotal > 0.0 ? weightedSum / weightTotal : Double(runStart + runEnd) * 0.5
+                            let halfSpan = max(1.5, Double(runWidth) * 0.5)
+                            for u in runStart...runEnd {
+                                bandSpineContrast[rowOffset + u] = rawContrast[u]
+                                bandCreaseCenter[rowOffset + u] = mu
+                                bandCreaseOffset[rowOffset + u] = abs(Double(u) - mu) / halfSpan
+                                bandCreaseLeft[rowOffset + u] = runStart
+                                bandCreaseRight[rowOffset + u] = runEnd
+                            }
+                        }
+                        x = runEnd + 1
+                    } else {
+                        x += 1
+                    }
                 }
             }
         }
 
-        // 3. Search over tilt angles and candidate gutter centers.
+        // 3. Search over tilt angles and candidate gutter centers (Dual-Mode: White Valley vs. Dark Crease).
         let minX = max(4, Int((Double(w) * configuration.searchRangeNormalized.lowerBound).rounded(.down)))
         let maxX = min(w - 5, Int((Double(w) * configuration.searchRangeNormalized.upperBound).rounded(.up)))
         guard minX <= maxX else {
@@ -204,7 +281,7 @@ public struct PageSplitEstimator: Sendable {
         let corridorHalfWidth = max(1, w / 160)
         let flankWindow = max(6, w / 20)
         let halfH = Double(h) * 0.5
-        let stepDeg = max(0.25, configuration.tiltStepDegrees)
+        let stepDeg = max(0.125, min(0.25, configuration.tiltStepDegrees))
         let maxTilt = max(0.0, configuration.maxTiltDegrees)
 
         var bestCost = Double.greatestFiniteMagnitude
@@ -212,18 +289,26 @@ public struct PageSplitEstimator: Sendable {
         var bestTiltDeg = 0.0
         var bestValleyClearance = 0.0
 
+        var bestCreaseCost = Double.greatestFiniteMagnitude
+        var bestCreaseCenterX = Double(w) * 0.5
+        var bestCreaseTiltDeg = 0.0
+        var bestCreaseStrength = 0.0
+        var bestVerticalContinuity = 0.0
+        var foundDarkCrease = false
+
         var tilt = -maxTilt
         while tilt <= maxTilt + 1e-9 {
             let tanPhi = tan(tilt * .pi / 180.0)
 
-            // Precompute smoothed corridor ink and spine score per (band, x).
             for cx in minX...maxX {
                 var corridorInkSum = 0.0
                 var flankInkSum = 0.0
                 var spineBonusSum = 0.0
+                var continuitySum = 0.0
+                var creaseOffsetSum = 0.0
                 var gapMidpointOffsetSum = 0.0
                 var validBands = 0
-                var spineConsistentBands = 0
+                var creaseBandCount = 0
 
                 for b in 0..<bandCount {
                     let y = bandCenterY[b]
@@ -248,25 +333,26 @@ public struct PageSplitEstimator: Sendable {
                     }
                     let flankDensity = Double(lInk + rInk) / Double(2 * flankWindow)
 
-                    let spineDip = bandSpineContrast[rowOffset + xAtBand]
-                    if spineDip > 18.0 {
-                        spineConsistentBands += 1
-                        spineBonusSum += spineDip
+                    let spineScore = bandSpineContrast[rowOffset + xAtBand]
+                    let continuity = bandDarkContinuity[rowOffset + xAtBand]
+                    continuitySum += continuity
+
+                    if spineScore > 0.0 {
+                        creaseBandCount += 1
+                        spineBonusSum += spineScore
+                        creaseOffsetSum += bandCreaseOffset[rowOffset + xAtBand]
+                    } else {
+                        creaseOffsetSum += 1.5
                     }
 
-                    // If this band has a spine crease (dark vertical line flanked by lighter paper),
-                    // do not penalize the dark pixels of the spine crease itself.
-                    if spineDip > 25.0 && corridorDensity > flankDensity {
-                        corridorInkSum += max(0.0, corridorDensity - spineDip * 0.25)
-                    } else {
-                        corridorInkSum += corridorDensity
-                    }
+                    corridorInkSum += corridorDensity
                     flankInkSum += flankDensity
                 }
 
                 guard validBands >= bandCount / 2 else { continue }
 
                 // Measure inner-margin gap midpoint alignment on bands with text on both sides.
+                // When inside a dark crease run, step outside the full crease bounds before scanning for text edges.
                 let textThreshold = max(1, (activeHeight / bandCount) / 14)
                 var gapBandCount = 0
                 for b in 0..<bandCount {
@@ -275,13 +361,17 @@ public struct PageSplitEstimator: Sendable {
                     if xAtBand < minX || xAtBand > maxX { continue }
                     let rowOffset = b * w
 
-                    // Only measure gap edges when the corridor itself is mostly clear or is a narrow spine line.
-                    let spineDip = bandSpineContrast[rowOffset + xAtBand]
-                    let scanRadius = spineDip > 25.0 ? max(3, corridorHalfWidth + 2) : 0
+                    let spineScore = bandSpineContrast[rowOffset + xAtBand]
+                    let leftStart = spineScore > 0.0
+                        ? bandCreaseLeft[rowOffset + xAtBand] - max(2, corridorHalfWidth)
+                        : xAtBand
+                    let rightStart = spineScore > 0.0
+                        ? bandCreaseRight[rowOffset + xAtBand] + max(2, corridorHalfWidth)
+                        : xAtBand
 
                     var leftEdge: Int? = nil
                     let leftSearchLimit = max(4, Int(Double(w) * 0.12))
-                    var lx = xAtBand - scanRadius
+                    var lx = leftStart
                     while lx >= leftSearchLimit {
                         if bandInk[rowOffset + lx] >= textThreshold {
                             leftEdge = lx
@@ -292,7 +382,7 @@ public struct PageSplitEstimator: Sendable {
 
                     var rightEdge: Int? = nil
                     let rightSearchLimit = min(w - 5, Int(Double(w) * 0.88))
-                    var rx = xAtBand + scanRadius
+                    var rx = rightStart
                     while rx <= rightSearchLimit {
                         if bandInk[rowOffset + rx] >= textThreshold {
                             rightEdge = rx
@@ -310,33 +400,60 @@ public struct PageSplitEstimator: Sendable {
 
                 let meanCorridorInk = corridorInkSum / Double(validBands)
                 let meanFlankInk = flankInkSum / Double(validBands)
-                let spineFactor = spineConsistentBands >= (validBands * 2 / 3)
-                    ? (spineBonusSum / Double(validBands)) * 0.08
-                    : 0.0
+                let meanSpineScore = spineBonusSum / Double(validBands)
+                let meanContinuity = continuitySum / Double(validBands)
+                let meanCreaseOffset = creaseOffsetSum / Double(validBands)
                 let gapPenalty = gapBandCount > 0
                     ? (gapMidpointOffsetSum / Double(gapBandCount)) * 18.0
                     : 2.5
-                let centerPrior = abs(Double(cx) / Double(w) - 0.5) * 1.8
+                let normX = Double(cx) / Double(w)
+                let centerPrior = abs(normX - 0.5) * 1.8
                 let tiltPrior = abs(tilt) * 0.015
 
-                let cost = meanCorridorInk * 3.5 + gapPenalty + centerPrior + tiltPrior - spineFactor
-                if cost < bestCost {
-                    bestCost = cost
+                // Mode A: White Valley cost (penalizes corridor ink)
+                let valleyCost = meanCorridorInk * 3.5 + gapPenalty + centerPrior + tiltPrior
+                if valleyCost < bestCost {
+                    bestCost = valleyCost
                     bestCenterX = Double(cx)
                     bestTiltDeg = tilt
-                    bestValleyClearance = max(0.0, meanFlankInk - meanCorridorInk) + spineFactor
+                    bestValleyClearance = max(0.0, meanFlankInk - meanCorridorInk)
+                }
+
+                // Mode B: Dark Crease cost (maximizes alignment with continuous dark crease midline mu_b)
+                let isCentralCreaseZone = mode == .twoPageSpread || (normX >= 0.36 && normX <= 0.64)
+                if isCentralCreaseZone && meanContinuity >= 0.75 && creaseBandCount * 4 >= validBands * 3 && meanSpineScore >= 10.0 {
+                    let creaseCost = meanCreaseOffset * 6.0
+                        + gapPenalty * 0.35
+                        + centerPrior
+                        + tiltPrior
+                        - meanSpineScore * 0.12
+                        - meanContinuity * 2.0
+                    if creaseCost < bestCreaseCost {
+                        bestCreaseCost = creaseCost
+                        bestCreaseCenterX = Double(cx)
+                        bestCreaseTiltDeg = tilt
+                        bestCreaseStrength = meanSpineScore
+                        bestVerticalContinuity = meanContinuity
+                        foundDarkCrease = true
+                    }
                 }
             }
 
             tilt += stepDeg
         }
 
-        let fullCenterX = (bestCenterX + 0.5) * scaleFactor
+        // Select between Dark Crease Mode and White Valley Mode.
+        let useDarkCrease = foundDarkCrease && bestCreaseStrength >= 12.0 && bestVerticalContinuity >= 0.75
+        let chosenCenterX = useDarkCrease ? bestCreaseCenterX : bestCenterX
+        let chosenTiltDeg = useDarkCrease ? bestCreaseTiltDeg : bestTiltDeg
+
+        let fullCenterX = (chosenCenterX + 0.5) * scaleFactor
         let normalizedCenterX = min(max(fullCenterX / Double(origWidth), 0.0), 1.0)
         let splitLine = GutterSplitLine(
             centerX: fullCenterX,
             normalizedCenterX: normalizedCenterX,
-            tiltDegrees: bestTiltDeg
+            tiltDegrees: chosenTiltDeg,
+            isDarkCrease: useDarkCrease
         )
 
         if mode == .twoPageSpread {
@@ -353,10 +470,10 @@ public struct PageSplitEstimator: Sendable {
         var leftMass = 0
         var rightMass = 0
         var centerCorridorMass = 0
-        let corridorRadius = max(2, w / 60)
+        let corridorRadius = useDarkCrease ? max(4, w / 28) : max(2, w / 60)
         for b in 0..<bandCount {
             let y = bandCenterY[b]
-            let splitX = Int((bestCenterX - (y - halfH) * tan(bestTiltDeg * .pi / 180.0)).rounded())
+            let splitX = Int((chosenCenterX - (y - halfH) * tan(chosenTiltDeg * .pi / 180.0)).rounded())
             let rowOffset = b * w
             for x in 0..<w {
                 let ink = bandInk[rowOffset + x]
@@ -374,6 +491,11 @@ public struct PageSplitEstimator: Sendable {
         let balanceRatio = Double(min(leftMass, rightMass)) / Double(max(1, max(leftMass, rightMass)))
         let sideMeanPerCol = Double(totalSideMass) / Double(max(1, w - 2 * corridorRadius - 1))
         let corridorMeanPerCol = Double(centerCorridorMass) / Double(2 * corridorRadius + 1)
+
+        if useDarkCrease && balanceRatio >= 0.10 {
+            let confidence = min(1.0, max(0.80, 0.55 + 0.25 * bestVerticalContinuity + 0.20 * balanceRatio))
+            return PageSplitDecision(layoutType: .twoPageSpread, splitLine: splitLine, confidence: confidence)
+        }
 
         let hasClearGutter = corridorMeanPerCol < sideMeanPerCol * 0.45 || bestValleyClearance > 0.8
         let isDefinitelyWide = aspectRatio >= configuration.definiteTwoPageAspectRatio
