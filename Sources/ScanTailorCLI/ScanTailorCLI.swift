@@ -67,6 +67,7 @@ public struct ScanTailorCLI {
         public var manifestPath: String?
         public var diagnosticsDirPath: String?
         public var splitMode: PageSplitMode = .automatic
+        public var gutterTrimWidth: Int = 24
         public var enableDewarp: Bool = true
         public var enableOCR: Bool = true
         public var binarizationMethod: AdaptiveBinarizer.Method = .wolfJolion
@@ -107,6 +108,7 @@ public struct ScanTailorCLI {
         var manifestPath: String? = nil
         var diagnosticsDirPath: String? = nil
         var splitMode: PageSplitMode = .automatic
+        var gutterTrimWidth = 24
         var enableDewarp = true
         var enableOCR = true
         var binarizeMethod: AdaptiveBinarizer.Method = .wolfJolion
@@ -142,6 +144,13 @@ public struct ScanTailorCLI {
                 default:
                     throw .invalidOptionValue(flag: arg, value: args[i + 1])
                 }
+                i += 2
+            case "--gutter-trim-width", "--gutter-trim":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let val = Int(args[i + 1]), val >= 0 else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                gutterTrimWidth = val
                 i += 2
             case "--binarize":
                 guard i + 1 < args.count else { throw .missingValue(flag: arg) }
@@ -193,6 +202,7 @@ public struct ScanTailorCLI {
         opts.manifestPath = manifestPath
         opts.diagnosticsDirPath = diagnosticsDirPath
         opts.splitMode = splitMode
+        opts.gutterTrimWidth = gutterTrimWidth
         opts.enableDewarp = enableDewarp
         opts.enableOCR = enableOCR
         opts.binarizationMethod = binarizeMethod
@@ -241,6 +251,7 @@ public struct ScanTailorCLI {
             processingDPI: 600,
             outputDPI: 300,
             splitMode: options.splitMode,
+            gutterTrimWidth: options.gutterTrimWidth,
             enableDewarp: options.enableDewarp,
             binarizerConfiguration: binConfig
         )
@@ -357,6 +368,7 @@ public struct ScanTailorCLI {
       --diagnostics-dir <dir>      Directory for manifest and PNG diagnostic overlays
       --all-diagnostics            Render PNG diagnostic overlays for all pages (not just low-confidence)
       --split-mode <mode>          Spread split mode: automatic (default), single, spread
+      --gutter-trim-width <px>     Central gutter strip trimming width in px at 600 DPI (default: 24)
       --binarize <method>          Adaptive thresholding: wolf (default) or sauvola
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping
       --no-ocr                     Disable Vision OCR searchable text layer

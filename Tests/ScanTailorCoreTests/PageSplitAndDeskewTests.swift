@@ -318,4 +318,63 @@ struct PageSplitAndDeskewTests {
             #expect(leftSlice.buffer[leftSlice.buffer.width - 1, bottomY] == 255)
         }
     }
+
+    @Test("PageSplitEstimator central gutter strip trimming physically excises spine crease ink")
+    func centralGutterStripTrimmingRemovesSpineCrease() throws {
+        let width = 1600
+        let height = 800
+        let centerX = 800.0
+
+        // Create a spread with white paper (245) and a 20-pixel wide dark spine crease (x in 790...810, intensity 40)
+        let pixels = ContiguousArray<UInt8>(repeating: 245, count: width * height)
+        var spread = GrayscaleBuffer(width: width, height: height, dpi: 300, pixels: pixels)
+        for y in 0..<height {
+            for x in 790...810 {
+                spread[x, y] = 40
+            }
+        }
+
+        let decision = PageSplitDecision(
+            layoutType: .twoPageSpread,
+            splitLine: GutterSplitLine(
+                centerX: centerX,
+                normalizedCenterX: centerX / Double(width),
+                tiltDegrees: 0.0,
+                isDarkCrease: true
+            ),
+            confidence: 0.95
+        )
+
+        // 1. Zero-width knife split retains crease on inner boundaries of both pages
+        let untrimmedSlices = PageSplitEstimator.split(spread, using: decision, gutterTrimWidth: 0)
+        #expect(untrimmedSlices.count == 2)
+        let untrimmedLeft = untrimmedSlices[0]
+        let untrimmedRight = untrimmedSlices[1]
+        #expect(untrimmedLeft.buffer.width == 800)
+        #expect(untrimmedRight.sourceBounds.x == 800)
+        #expect(untrimmedLeft.buffer[795, 400] == 40) // Left slice still contains crease ink at right edge
+        #expect(untrimmedRight.buffer[5, 400] == 40)  // Right slice still contains crease ink at left edge (805 - 800 = 5)
+
+        // 2. Central gutter strip trimming (24 px: 12 px left, 12 px right)
+        let trimmedSlices = PageSplitEstimator.split(spread, using: decision, gutterTrimWidth: 24)
+        #expect(trimmedSlices.count == 2)
+        let trimmedLeft = trimmedSlices[0]
+        let trimmedRight = trimmedSlices[1]
+
+        #expect(trimmedLeft.gutterTrimWidth == 24)
+        #expect(trimmedRight.gutterTrimWidth == 24)
+
+        // Left sub-page must terminate at 800 - 12 = 788 px
+        #expect(trimmedLeft.sourceBounds == Rect2I(x: 0, y: 0, width: 788, height: height))
+        #expect(trimmedLeft.buffer.width == 788)
+        // Right sub-page must begin at 800 + 12 = 812 px
+        #expect(trimmedRight.sourceBounds == Rect2I(x: 812, y: 0, width: width - 812, height: height))
+        #expect(trimmedRight.buffer.width == width - 812)
+
+        // The 24 px central crease corridor is completely excised: both inner edges are paper white!
+        for y in stride(from: 0, to: height, by: 50) {
+            #expect(trimmedLeft.buffer[trimmedLeft.buffer.width - 1, y] == 245)
+            #expect(trimmedRight.buffer[0, y] == 245)
+        }
+    }
 }

@@ -147,6 +147,9 @@ public struct BookPipelineCoordinator: Sendable {
         public var outputDPI: Int
         /// Spread split mode (`.automatic`, `.singlePage`, or `.twoPageSpread`).
         public var splitMode: PageSplitMode
+        /// Central gutter strip trimming width in pixels at 600 DPI physically removed between split pages (default: `24`).
+        /// Scaled proportionally when `processingDPI` differs from 600 DPI.
+        public var gutterTrimWidth: Int
         /// Whether 3D cubic-sheet curvature dewarping is enabled (default: `true`).
         public var enableDewarp: Bool
         /// Minimum vertical sag in pixels (at 600 DPI) required to trigger 3D dewarping; flatter pages bypass resampling (default: `12.0`).
@@ -168,6 +171,7 @@ public struct BookPipelineCoordinator: Sendable {
             processingDPI: Int = 600,
             outputDPI: Int = 300,
             splitMode: PageSplitMode = .automatic,
+            gutterTrimWidth: Int = 24,
             enableDewarp: Bool = true,
             minDewarpSagPixelsAt600DPI: Double = 12.0,
             binarizerConfiguration: AdaptiveBinarizer.Configuration = AdaptiveBinarizer.Configuration(
@@ -183,6 +187,7 @@ public struct BookPipelineCoordinator: Sendable {
             self.processingDPI = max(150, processingDPI)
             self.outputDPI = max(72, outputDPI)
             self.splitMode = splitMode
+            self.gutterTrimWidth = max(0, gutterTrimWidth)
             self.enableDewarp = enableDewarp
             self.minDewarpSagPixelsAt600DPI = max(1.0, minDewarpSagPixelsAt600DPI)
             self.binarizerConfiguration = binarizerConfiguration
@@ -306,6 +311,7 @@ public struct BookPipelineCoordinator: Sendable {
 
         let dpiScale = Double(configuration.processingDPI) / 600.0
         let minSagPixels = configuration.minDewarpSagPixelsAt600DPI * dpiScale
+        let effectiveGutterTrimWidth = max(0, Int((Double(configuration.gutterTrimWidth) * dpiScale).rounded()))
 
         for (srcIdx, rawScan) in sourcePages.enumerated() {
             let splitDecision = PageSplitEstimator.estimateSplit(
@@ -313,7 +319,11 @@ public struct BookPipelineCoordinator: Sendable {
                 mode: configuration.splitMode
             )
             sourceSplits.append(splitDecision)
-            let slices = PageSplitEstimator.split(rawScan, using: splitDecision)
+            let slices = PageSplitEstimator.split(
+                rawScan,
+                using: splitDecision,
+                gutterTrimWidth: effectiveGutterTrimWidth
+            )
 
             for slice in slices {
                 let outIdx = pass1Pages.count

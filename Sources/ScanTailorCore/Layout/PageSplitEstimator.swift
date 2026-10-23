@@ -94,11 +94,18 @@ public struct SplitPageSlice: Sendable, Equatable {
     public let side: PageSide
     public let buffer: GrayscaleBuffer
     public let sourceBounds: Rect2I
+    public let gutterTrimWidth: Int
 
-    public init(side: PageSide, buffer: GrayscaleBuffer, sourceBounds: Rect2I) {
+    public init(
+        side: PageSide,
+        buffer: GrayscaleBuffer,
+        sourceBounds: Rect2I,
+        gutterTrimWidth: Int = 0
+    ) {
         self.side = side
         self.buffer = buffer
         self.sourceBounds = sourceBounds
+        self.gutterTrimWidth = gutterTrimWidth
     }
 }
 
@@ -111,19 +118,23 @@ public struct PageSplitEstimator: Sendable {
         public var searchRangeNormalized: ClosedRange<Double>
         public var maxTiltDegrees: Double
         public var tiltStepDegrees: Double
+        /// Central gutter strip trimming width in pixels physically removed between split pages (default: `24`).
+        public var gutterTrimWidth: Int
 
         public init(
             minimumTwoPageAspectRatio: Double = 1.12,
             definiteTwoPageAspectRatio: Double = 1.32,
             searchRangeNormalized: ClosedRange<Double> = 0.30...0.70,
             maxTiltDegrees: Double = 10.0,
-            tiltStepDegrees: Double = 0.5
+            tiltStepDegrees: Double = 0.5,
+            gutterTrimWidth: Int = 24
         ) {
             self.minimumTwoPageAspectRatio = minimumTwoPageAspectRatio
             self.definiteTwoPageAspectRatio = definiteTwoPageAspectRatio
             self.searchRangeNormalized = searchRangeNormalized
             self.maxTiltDegrees = maxTiltDegrees
             self.tiltStepDegrees = tiltStepDegrees
+            self.gutterTrimWidth = max(0, gutterTrimWidth)
         }
     }
 
@@ -509,32 +520,52 @@ public struct PageSplitEstimator: Sendable {
     }
 
     /// Splits `buffer` into one (`.single`) or two (`.leftVerso`, `.rightRecto`) page slices.
+    ///
+    /// - Parameters:
+    ///   - buffer: The input grayscale page or spread.
+    ///   - decision: Page split decision containing layout classification and gutter line geometry.
+    ///   - gutterTrimWidth: Central gutter strip trimming width in pixels physically removed
+    ///     between left and right page slices to excise spine creases (default: `24`).
+    ///   - backgroundFill: Grayscale value used to fill masked boundary wedges (default: `255`, white).
     public static func split(
         _ buffer: borrowing GrayscaleBuffer,
         using decision: PageSplitDecision,
+        gutterTrimWidth: Int = 24,
         backgroundFill: UInt8 = 255
     ) -> [SplitPageSlice] {
         let width = buffer.width
         let height = buffer.height
         guard decision.layoutType == .twoPageSpread, let splitLine = decision.splitLine, width >= 2, height >= 1 else {
             let bounds = Rect2I(x: 0, y: 0, width: width, height: height)
-            return [SplitPageSlice(side: .single, buffer: copy buffer, sourceBounds: bounds)]
+            return [SplitPageSlice(side: .single, buffer: copy buffer, sourceBounds: bounds, gutterTrimWidth: 0)]
         }
 
-        var rowSplitX = [Int](repeating: width / 2, count: height)
-        var minSplitX = width - 1
-        var maxSplitX = 1
+        let maxTrim = max(0, width - 4)
+        let trim = min(max(0, gutterTrimWidth), maxTrim)
+        let leftTrim = trim / 2
+        let rightTrim = trim - leftTrim
+
+        var rowLeftCutX = [Int](repeating: width / 2, count: height)
+        var rowRightCutX = [Int](repeating: width / 2, count: height)
+        var maxLeftCutX = 0
+        var minRightCutX = width
 
         for y in 0..<height {
             let rawX = Int(splitLine.x(atY: Double(y) + 0.5, height: height).rounded())
-            let clampedX = min(max(rawX, 1), width - 1)
-            rowSplitX[y] = clampedX
-            if clampedX < minSplitX { minSplitX = clampedX }
-            if clampedX > maxSplitX { maxSplitX = clampedX }
+            let clampedX = min(max(rawX, 0), width)
+
+            let cutLeft = max(0, min(clampedX - leftTrim, width))
+            let cutRight = min(width, max(clampedX + rightTrim, 0))
+
+            rowLeftCutX[y] = cutLeft
+            rowRightCutX[y] = cutRight
+
+            if cutLeft > maxLeftCutX { maxLeftCutX = cutLeft }
+            if cutRight < minRightCutX { minRightCutX = cutRight }
         }
 
-        let leftWidth = max(1, maxSplitX)
-        let rightStartX = min(width - 1, minSplitX)
+        let leftWidth = max(1, maxLeftCutX)
+        let rightStartX = min(width - 1, max(0, minRightCutX))
         let rightWidth = max(1, width - rightStartX)
 
         var leftPixels = ContiguousArray<UInt8>(repeating: backgroundFill, count: leftWidth * height)
@@ -543,21 +574,24 @@ public struct PageSplitEstimator: Sendable {
         buffer.pixels.withUnsafeBufferPointer { src in
             let srcStride = buffer.rowBytes
             for y in 0..<height {
-                let splitX = rowSplitX[y]
                 let srcRow = y * srcStride
 
-                // Left slice: copy columns 0..<splitX, mask splitX..<leftWidth with backgroundFill.
-                let leftCopyCount = min(splitX, leftWidth)
+                // Left slice: copy columns 0..<cutLeft, mask cutLeft..<leftWidth with backgroundFill.
+                let cutLeft = rowLeftCutX[y]
+                let leftCopyCount = min(cutLeft, leftWidth)
                 let leftDstRow = y * leftWidth
                 for x in 0..<leftCopyCount {
                     leftPixels[leftDstRow + x] = src[srcRow + x]
                 }
 
-                // Right slice: copy columns splitX..<width into (splitX - rightStartX)..<rightWidth.
+                // Right slice: copy columns cutRight..<width into (cutRight - rightStartX)..<rightWidth.
+                let cutRight = rowRightCutX[y]
+                let startCol = max(cutRight, rightStartX)
                 let rightDstRow = y * rightWidth
-                let startCol = max(splitX, rightStartX)
-                for x in startCol..<width {
-                    rightPixels[rightDstRow + (x - rightStartX)] = src[srcRow + x]
+                if startCol < width {
+                    for x in startCol..<width {
+                        rightPixels[rightDstRow + (x - rightStartX)] = src[srcRow + x]
+                    }
                 }
             }
         }
@@ -569,12 +603,14 @@ public struct PageSplitEstimator: Sendable {
             SplitPageSlice(
                 side: .leftVerso,
                 buffer: leftBuffer,
-                sourceBounds: Rect2I(x: 0, y: 0, width: leftWidth, height: height)
+                sourceBounds: Rect2I(x: 0, y: 0, width: leftWidth, height: height),
+                gutterTrimWidth: trim
             ),
             SplitPageSlice(
                 side: .rightRecto,
                 buffer: rightBuffer,
-                sourceBounds: Rect2I(x: rightStartX, y: 0, width: rightWidth, height: height)
+                sourceBounds: Rect2I(x: rightStartX, y: 0, width: rightWidth, height: height),
+                gutterTrimWidth: trim
             )
         ]
     }
