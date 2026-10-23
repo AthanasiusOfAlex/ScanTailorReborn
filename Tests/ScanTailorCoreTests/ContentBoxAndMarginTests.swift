@@ -3,6 +3,7 @@ import ScanTailorContracts
 import ScanTailorCore
 import ScanTailorPipeline
 import ScanTailorPortableBackend
+import ScanTailorCLI
 
 @Suite("Content Box Detection, 3-Tier Margin Harmonizer & Book Pipeline Tests")
 struct ContentBoxAndMarginTests {
@@ -450,6 +451,76 @@ struct ContentBoxAndMarginTests {
         // Page must NOT be pruned because OCR confirmed the presence of text
         #expect(output.manifest.pages.count == 1)
         #expect(output.manifest.prunedPages.isEmpty)
+    }
+
+    @Test("PublicationMargins parses dimensions across in, pt, mm, px and asymmetric CSS-like strings")
+    func testPublicationMarginsParsingAndDPIConversion() throws {
+        // 1. Shorthand top/bottom, left/right
+        let m1 = try #require(PublicationMargins.parse("0.25in, 0.5in"))
+        #expect(m1.top.value == 0.25 && m1.top.unit == .inches)
+        #expect(m1.bottom.value == 0.25 && m1.bottom.unit == .inches)
+        #expect(m1.left.value == 0.50 && m1.left.unit == .inches)
+        #expect(m1.right.value == 0.50 && m1.right.unit == .inches)
+        #expect(m1.verticalMargins(dpi: 600) == (150, 150))
+        #expect(m1.horizontalMargins(for: .verso, dpi: 600) == (300, 300))
+
+        // 2. Key-value string with units
+        let m2 = try #require(PublicationMargins.parse("top=18pt,bottom=18pt,inner=0.75in,outer=0.5in"))
+        #expect(m2.top.unit == .points && m2.top.value == 18.0)
+        #expect(m2.inner?.unit == .inches && m2.inner?.value == 0.75)
+        #expect(m2.outer?.unit == .inches && m2.outer?.value == 0.50)
+
+        // At 600 DPI: 18 pt = (18 / 72) * 600 = 150 px
+        let v2 = m2.verticalMargins(dpi: 600)
+        #expect(v2.top == 150)
+        #expect(v2.bottom == 150)
+
+        // Recto: inner (0.75in = 450 px) is on left, outer (0.5in = 300 px) is on right
+        let rectoH = m2.horizontalMargins(for: .recto, dpi: 600)
+        #expect(rectoH.left == 450)
+        #expect(rectoH.right == 300)
+
+        // Verso: outer (0.5in = 300 px) is on left, inner (0.75in = 450 px) is on right
+        let versoH = m2.horizontalMargins(for: .verso, dpi: 600)
+        #expect(versoH.left == 300)
+        #expect(versoH.right == 450)
+
+        // 3. Millimeters parsing: 25.4mm = 1.0 inch = 600 px at 600 DPI
+        let m3 = try #require(PublicationMargins.parse("top=25.4mm,left=12.7mm"))
+        #expect(m3.verticalMargins(dpi: 600).top == 600)
+        #expect(m3.horizontalMargins(for: .single, dpi: 600).left == 300)
+    }
+
+    @Test("CLI option parsing correctly handles publication margins, page ranges, exclusions, and starting side")
+    func testCLIParsingOptionsForMarginsAndPageFilters() throws {
+        // Valid full CLI arguments
+        let args = [
+            "process",
+            "input.pdf",
+            "-o", "output.pdf",
+            "--margins", "top=0.25in,bottom=0.25in,left=0.5in,right=0.5in",
+            "--page-range", "2-5",
+            "--exclude-pages", "1,3,7",
+            "--first-page-side", "verso"
+        ]
+        let opts = try ScanTailorCLI.parseProcessOptions(Array(args.dropFirst()))
+        #expect(opts.inputPDFPath == "input.pdf")
+        #expect(opts.outputPDFPath == "output.pdf")
+        #expect(opts.pageRange == 2...5)
+        #expect(opts.excludedPages == [1, 3, 7])
+        #expect(opts.firstPageSide == .verso)
+        #expect(opts.margins.top.value == 0.25)
+        #expect(opts.margins.left.value == 0.50)
+
+        // Invalid margins format throws error
+        #expect(throws: ScanTailorCLI.CLIError.self) {
+            _ = try ScanTailorCLI.parseProcessOptions(["input.pdf", "-o", "out.pdf", "--margins", "invalid-margin"])
+        }
+
+        // Invalid page-range throws error
+        #expect(throws: ScanTailorCLI.CLIError.self) {
+            _ = try ScanTailorCLI.parseProcessOptions(["input.pdf", "-o", "out.pdf", "--page-range", "abc"])
+        }
     }
 
     // MARK: - Test Helpers

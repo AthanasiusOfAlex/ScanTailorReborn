@@ -69,6 +69,10 @@ public struct ScanTailorCLI {
         public var splitMode: PageSplitMode = .automatic
         public var gutterTrimWidth: Int = 24
         public var autoPruneBlankPages: Bool = true
+        public var margins: PublicationMargins = .publicationDefault
+        public var pageRange: ClosedRange<Int>?
+        public var excludedPages: Set<Int> = []
+        public var firstPageSide: MarginHarmonizer.PageSide = .recto
         public var enableDewarp: Bool = true
         public var enableOCR: Bool = true
         public var binarizationMethod: AdaptiveBinarizer.Method = .wolfJolion
@@ -111,6 +115,10 @@ public struct ScanTailorCLI {
         var splitMode: PageSplitMode = .automatic
         var gutterTrimWidth = 24
         var autoPruneBlankPages = true
+        var margins: PublicationMargins = .publicationDefault
+        var pageRange: ClosedRange<Int>? = nil
+        var excludedPages: Set<Int> = []
+        var firstPageSide: MarginHarmonizer.PageSide = .recto
         var enableDewarp = true
         var enableOCR = true
         var binarizeMethod: AdaptiveBinarizer.Method = .wolfJolion
@@ -153,6 +161,51 @@ public struct ScanTailorCLI {
                     throw .invalidOptionValue(flag: arg, value: args[i + 1])
                 }
                 gutterTrimWidth = val
+                i += 2
+            case "--margins", "--margin":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let parsed = PublicationMargins.parse(args[i + 1]) else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                margins = parsed
+                i += 2
+            case "--page-range", "--pages":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                let val = args[i + 1]
+                let parts = val.components(separatedBy: CharacterSet(charactersIn: "-."))
+                    .filter { !$0.isEmpty }
+                if parts.count == 2, let start = Int(parts[0]), let end = Int(parts[1]), start <= end, start >= 1 {
+                    pageRange = start...end
+                } else if parts.count == 1, let single = Int(parts[0]), single >= 1 {
+                    pageRange = single...single
+                } else {
+                    throw .invalidOptionValue(flag: arg, value: val)
+                }
+                i += 2
+            case "--exclude-pages", "--exclude-page", "--exclude":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                let val = args[i + 1]
+                let pageStrs = val.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                var parsedSet = Set<Int>()
+                for pStr in pageStrs {
+                    guard let pNum = Int(pStr), pNum >= 1 else {
+                        throw .invalidOptionValue(flag: arg, value: val)
+                    }
+                    parsedSet.insert(pNum)
+                }
+                excludedPages = parsedSet
+                i += 2
+            case "--first-page-side", "--first-side":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                let val = args[i + 1].lowercased()
+                switch val {
+                case "recto", "right":
+                    firstPageSide = .recto
+                case "verso", "left":
+                    firstPageSide = .verso
+                default:
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
                 i += 2
             case "--binarize":
                 guard i + 1 < args.count else { throw .missingValue(flag: arg) }
@@ -209,6 +262,10 @@ public struct ScanTailorCLI {
         opts.splitMode = splitMode
         opts.gutterTrimWidth = gutterTrimWidth
         opts.autoPruneBlankPages = autoPruneBlankPages
+        opts.margins = margins
+        opts.pageRange = pageRange
+        opts.excludedPages = excludedPages
+        opts.firstPageSide = firstPageSide
         opts.enableDewarp = enableDewarp
         opts.enableOCR = enableOCR
         opts.binarizationMethod = binarizeMethod
@@ -253,6 +310,7 @@ public struct ScanTailorCLI {
             method: options.binarizationMethod,
             backgroundNormalization: BackgroundNormalizer.Configuration()
         )
+        let harmConfig = MarginHarmonizer.Configuration(margins: options.margins)
         let pipeConfig = BookPipelineCoordinator.Configuration(
             processingDPI: 600,
             outputDPI: 300,
@@ -260,7 +318,11 @@ public struct ScanTailorCLI {
             gutterTrimWidth: options.gutterTrimWidth,
             autoPruneBlankPages: options.autoPruneBlankPages,
             enableDewarp: options.enableDewarp,
-            binarizerConfiguration: binConfig
+            binarizerConfiguration: binConfig,
+            harmonizerConfiguration: harmConfig,
+            firstPageSide: options.firstPageSide,
+            pageRange: options.pageRange,
+            excludedPages: options.excludedPages
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -382,6 +444,11 @@ public struct ScanTailorCLI {
       --all-diagnostics            Render PNG diagnostic overlays for all pages (not just low-confidence)
       --split-mode <mode>          Spread split mode: automatic (default), single, spread
       --gutter-trim-width <px>     Central gutter strip trimming width in px at 600 DPI (default: 24)
+      --margins <spec>             Publication margins, e.g. "top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"
+                                   (supports in, pt, mm, px; inner/gutter, outer)
+      --page-range <range>         1-based source scan range (e.g. 1-10, 5..20)
+      --exclude-pages <list>       Comma-separated 1-based source scan indices to skip (e.g. 1,2,5)
+      --first-page-side <side>     Initial logical book side: recto (default) or verso
       --binarize <method>          Adaptive thresholding: wolf (default) or sauvola
       --no-auto-prune              Disable automatic pruning of blank sub-page slices
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping

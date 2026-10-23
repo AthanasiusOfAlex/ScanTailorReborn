@@ -217,6 +217,12 @@ public struct BookPipelineCoordinator: Sendable {
         public var contentDetectorConfiguration: ContentBoxDetector.Configuration
         /// Book-wide margin harmonizer configuration.
         public var harmonizerConfiguration: MarginHarmonizer.Configuration
+        /// Logical book page side assigned to the very first output page (default: `.recto`).
+        public var firstPageSide: MarginHarmonizer.PageSide
+        /// 1-based source PDF page indices to process (empty means all pages).
+        public var pageRange: ClosedRange<Int>?
+        /// 1-based source PDF page indices to exclude from processing.
+        public var excludedPages: Set<Int>
         /// BCP-47 language codes passed to `OCREngine` (default: `["en-US"]`).
         public var ocrLanguages: [String]
         /// Confidence threshold in `[0, 1]` below which a page is flagged for diagnostic review (default: `0.75`).
@@ -238,6 +244,9 @@ public struct BookPipelineCoordinator: Sendable {
             cleanerConfiguration: BorderAndSpeckleCleaner.Configuration = BorderAndSpeckleCleaner.Configuration(),
             contentDetectorConfiguration: ContentBoxDetector.Configuration = ContentBoxDetector.Configuration(cleanBordersFirst: false),
             harmonizerConfiguration: MarginHarmonizer.Configuration = MarginHarmonizer.Configuration(),
+            firstPageSide: MarginHarmonizer.PageSide = .recto,
+            pageRange: ClosedRange<Int>? = nil,
+            excludedPages: Set<Int> = [],
             ocrLanguages: [String] = ["en-US"],
             lowConfidenceThreshold: Double = 0.75
         ) {
@@ -253,6 +262,9 @@ public struct BookPipelineCoordinator: Sendable {
             self.cleanerConfiguration = cleanerConfiguration
             self.contentDetectorConfiguration = contentDetectorConfiguration
             self.harmonizerConfiguration = harmonizerConfiguration
+            self.firstPageSide = (firstPageSide == .single) ? .recto : firstPageSide
+            self.pageRange = pageRange
+            self.excludedPages = excludedPages
             self.ocrLanguages = ocrLanguages
             self.lowConfidenceThreshold = min(max(0.0, lowConfidenceThreshold), 1.0)
         }
@@ -302,6 +314,14 @@ public struct BookPipelineCoordinator: Sendable {
         sourceGrayPages.reserveCapacity(sourceCount)
 
         for srcIdx in 0..<sourceCount {
+            let oneBased = srcIdx + 1
+            if let range = configuration.pageRange, !range.contains(oneBased) {
+                continue
+            }
+            if configuration.excludedPages.contains(oneBased) {
+                continue
+            }
+
             do {
                 let gray = try await reader.rasterizePage(at: srcIdx, targetDPI: configuration.processingDPI)
                 sourceGrayPages.append(gray)
@@ -396,7 +416,12 @@ public struct BookPipelineCoordinator: Sendable {
                 case .rightRecto:
                     bookSide = .recto
                 case .single:
-                    bookSide = (outIdx % 2 == 0) ? .recto : .verso
+                    let startIsRecto = (configuration.firstPageSide != .verso)
+                    if startIsRecto {
+                        bookSide = (outIdx % 2 == 0) ? .recto : .verso
+                    } else {
+                        bookSide = (outIdx % 2 == 0) ? .verso : .recto
+                    }
                 }
 
                 // 1a. Multi-scale Deskew

@@ -113,7 +113,8 @@ let package = Package(
                 "ScanTailorContracts",
                 "ScanTailorCore",
                 "ScanTailorPipeline",
-                "ScanTailorPortableBackend"
+                "ScanTailorPortableBackend",
+                "ScanTailorCLI"
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

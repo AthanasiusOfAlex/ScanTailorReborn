@@ -33,9 +33,23 @@ public struct MarginHarmonizer: Sendable {
 
     public struct Configuration: Sendable, Equatable {
         /// Horizontal margin padding in pixels (at 600 DPI) around the canonical text block when auto-sizing the output canvas.
-        public var canonicalHorizontalMarginAt600DPI: Int
+        public var canonicalHorizontalMarginAt600DPI: Int {
+            get { margins.left.toPixels(atDPI: 600) }
+            set {
+                margins.left = PublicationMargins.Dimension(value: Double(newValue) / 600.0, unit: .inches)
+                margins.right = PublicationMargins.Dimension(value: Double(newValue) / 600.0, unit: .inches)
+            }
+        }
         /// Vertical margin padding in pixels (at 600 DPI) around the canonical text block when auto-sizing the output canvas.
-        public var canonicalVerticalMarginAt600DPI: Int
+        public var canonicalVerticalMarginAt600DPI: Int {
+            get { margins.top.toPixels(atDPI: 600) }
+            set {
+                margins.top = PublicationMargins.Dimension(value: Double(newValue) / 600.0, unit: .inches)
+                margins.bottom = PublicationMargins.Dimension(value: Double(newValue) / 600.0, unit: .inches)
+            }
+        }
+        /// Configurable publication margins (top, bottom, left, right, inner, outer).
+        public var margins: PublicationMargins
         /// Maximum fractional width deviation from `canonicalFrame.width` for a page to qualify as full-width (`Tier 1` or `Tier 2`).
         public var fullWidthToleranceFraction: Double
         /// Maximum fractional height deviation from `canonicalFrame.height` for a page to qualify as `Tier 1 (fullBody)`.
@@ -50,8 +64,9 @@ public struct MarginHarmonizer: Sendable {
         public var canonicalDimensionIQROutlierMultiplier: Double
 
         public init(
-            canonicalHorizontalMarginAt600DPI: Int = 300,
-            canonicalVerticalMarginAt600DPI: Int = 360,
+            margins: PublicationMargins = .publicationDefault,
+            canonicalHorizontalMarginAt600DPI: Int? = nil,
+            canonicalVerticalMarginAt600DPI: Int? = nil,
             fullWidthToleranceFraction: Double = 0.08,
             fullHeightToleranceFraction: Double = 0.08,
             minPartialHeightFraction: Double = 0.22,
@@ -59,8 +74,16 @@ public struct MarginHarmonizer: Sendable {
             canonicalDimensionOutlierToleranceFraction: Double = 0.25,
             canonicalDimensionIQROutlierMultiplier: Double = 1.5
         ) {
-            self.canonicalHorizontalMarginAt600DPI = max(0, canonicalHorizontalMarginAt600DPI)
-            self.canonicalVerticalMarginAt600DPI = max(0, canonicalVerticalMarginAt600DPI)
+            var m = margins
+            if let h = canonicalHorizontalMarginAt600DPI {
+                m.left = PublicationMargins.Dimension(value: Double(max(0, h)) / 600.0, unit: .inches)
+                m.right = PublicationMargins.Dimension(value: Double(max(0, h)) / 600.0, unit: .inches)
+            }
+            if let v = canonicalVerticalMarginAt600DPI {
+                m.top = PublicationMargins.Dimension(value: Double(max(0, v)) / 600.0, unit: .inches)
+                m.bottom = PublicationMargins.Dimension(value: Double(max(0, v)) / 600.0, unit: .inches)
+            }
+            self.margins = m
             self.fullWidthToleranceFraction = min(max(0.01, fullWidthToleranceFraction), 0.30)
             self.fullHeightToleranceFraction = min(max(0.01, fullHeightToleranceFraction), 0.30)
             self.minPartialHeightFraction = min(max(0.05, minPartialHeightFraction), 0.85)
@@ -190,9 +213,12 @@ public struct MarginHarmonizer: Sendable {
         }
 
         let referenceDPI = max(72, pages[0].dpi)
-        let dpiScale = Double(referenceDPI) / 600.0
-        let hMargin = Int((Double(configuration.canonicalHorizontalMarginAt600DPI) * dpiScale).rounded())
-        let vMargin = Int((Double(configuration.canonicalVerticalMarginAt600DPI) * dpiScale).rounded())
+        let (topMargin, bottomMargin) = configuration.margins.verticalMargins(dpi: referenceDPI)
+        let versoMargins = configuration.margins.horizontalMargins(for: .verso, dpi: referenceDPI)
+        let rectoMargins = configuration.margins.horizontalMargins(for: .recto, dpi: referenceDPI)
+
+        let minHMargin = min(versoMargins.left + versoMargins.right, rectoMargins.left + rectoMargins.right)
+        let minVMargin = topMargin + bottomMargin
 
         // Step 1: Collect raw non-empty content widths and heights to estimate the 75th-percentile
         // canonical width prior for Pass 2 smudge outlier rejection.
@@ -253,63 +279,25 @@ public struct MarginHarmonizer: Sendable {
         )
 
         let canonicalTextWidth = Self.percentileInt(filteredWidths, p: 0.85)
-            ?? max(1, medianPageWidth - 2 * hMargin)
+            ?? max(1, medianPageWidth - minHMargin)
         let canonicalTextHeight = Self.percentileInt(filteredHeights, p: 0.85)
-            ?? max(1, medianPageHeight - 2 * vMargin)
+            ?? max(1, medianPageHeight - minVMargin)
 
         // Determine uniform output canvas size:
-        // Large enough to accommodate the median physical page size and the canonical text block + margins.
-        let canvasWidth = max(medianPageWidth, canonicalTextWidth + 2 * hMargin)
-        let canvasHeight = max(medianPageHeight, canonicalTextHeight + 2 * vMargin)
+        // Large enough to accommodate the median physical page size and the canonical text block + configured margins.
+        let neededVersoW = canonicalTextWidth + versoMargins.left + versoMargins.right
+        let neededRectoW = canonicalTextWidth + rectoMargins.left + rectoMargins.right
+        let canvasWidth = max(medianPageWidth, max(neededVersoW, neededRectoW))
+        let canvasHeight = max(medianPageHeight, canonicalTextHeight + topMargin + bottomMargin)
         let canvasSize = Size2I(width: max(1, canvasWidth), height: max(1, canvasHeight))
 
-        // Estimate typical physical top margin and horizontal offset for Verso and Recto body pages
-        // so the canonical frame sits naturally where full body pages sit on the physical page.
-        var versoLeftMargins: [Int] = []
-        var rectoLeftMargins: [Int] = []
-        var bodyTopMargins: [Int] = []
-
-        for (idx, page) in pages.enumerated() {
-            guard let box = refinedDetections[idx].contentBox else { continue }
-            let widthDiff = abs(box.width - canonicalTextWidth)
-            let heightDiff = abs(box.height - canonicalTextHeight)
-            let isNearFullWidth = Double(widthDiff) <= Double(canonicalTextWidth) * configuration.fullWidthToleranceFraction
-            let isNearFullHeight = Double(heightDiff) <= Double(canonicalTextHeight) * configuration.fullHeightToleranceFraction
-
-            if isNearFullWidth {
-                let offsetX = (canvasSize.width - page.pageSize.width) / 2
-                let mappedMinX = box.minX + offsetX
-                switch page.side {
-                case .verso:
-                    versoLeftMargins.append(mappedMinX)
-                case .recto, .single:
-                    rectoLeftMargins.append(mappedMinX)
-                }
-            }
-            if isNearFullWidth && isNearFullHeight {
-                let offsetY = (canvasSize.height - page.pageSize.height) / 2
-                bodyTopMargins.append(box.minY + offsetY)
-            }
-        }
-
-        let centeredX = max(0, (canvasSize.width - canonicalTextWidth) / 2)
-        let centeredY = max(0, (canvasSize.height - canonicalTextHeight) / 2)
-
-        let canonicalTopY = Self.clampOrigin(
-            Self.percentileInt(bodyTopMargins, p: 0.50) ?? centeredY,
-            span: canonicalTextHeight,
-            canvasSpan: canvasSize.height
-        )
-        let versoLeftX = Self.clampOrigin(
-            Self.percentileInt(versoLeftMargins, p: 0.50) ?? centeredX,
-            span: canonicalTextWidth,
-            canvasSpan: canvasSize.width
-        )
-        let rectoLeftX = Self.clampOrigin(
-            Self.percentileInt(rectoLeftMargins, p: 0.50) ?? centeredX,
-            span: canonicalTextWidth,
-            canvasSpan: canvasSize.width
-        )
+        // Position canonical frames:
+        // If explicit publication margins are provided, align canonical text frames accordingly.
+        // Verso: x = versoMargins.left, y = topMargin
+        // Recto: x = rectoMargins.left, y = topMargin
+        let canonicalTopY = topMargin
+        let versoLeftX = versoMargins.left
+        let rectoLeftX = rectoMargins.left
 
         let versoFrame = Rect2I(
             x: versoLeftX,
