@@ -175,7 +175,9 @@ public enum SkewEstimator {
         )
 
         let ratio = coarseMedianEnergy > 1e-9 ? (peakEnergy / coarseMedianEnergy) : 1.0
-        let confidence = min(1.0, max(0.0, (ratio - 1.0) / 4.0))
+        // Scaled so that a clear text-line energy peak (ratio >= 2.5x coarse median) reaches 1.0 confidence.
+        // A ratio of 1.75x yields 0.50, and 1.0 yields 0.0.
+        let confidence = min(1.0, max(0.0, (ratio - 1.0) / 1.5))
 
         return SkewEstimate(
             angleDegrees: fineBestAngle,
