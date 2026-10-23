@@ -1,6 +1,6 @@
 # ScanTailorReborn: Real-World Evaluation, Algorithmic Analysis, and Architectural Roadmap
 
-**Document Version:** 1.1.0  
+**Document Version:** 1.2.0  
 **Date:** October 2026  
 **Author:** AthanasiusOfAlex & Antigravity  
 **Target System:** `scantailor-cli` / macOS 14.0+ (Apple Silicon Metal & CoreGraphics)  
@@ -283,13 +283,123 @@ scantailor-cli process input.pdf -o output.pdf \
 
 ---
 
-## 7. Implementation Strategy & Milestones
+## 7. Implementation Strategy, Granularity & Model Recommendations
 
-| Phase | Milestone | Scope |
-| :--- | :--- | :--- |
-| **Phase 1** | **Calibration & Font Optimization** | 1. Recalibrate `SkewEstimator` confidence curve (denominator $1.5$).<br>2. Deduplicate font subsets in `ApplePDFDocumentWriter` (5.3 MB $\rightarrow$ 1.4 MB). |
-| **Phase 2** | **Spine Crease, Gutter & Content Filtering** | 1. Implement Dual-Mode Gutter Detection (Dark Crease vs White Valley).<br>2. Add central gutter strip trimming ($W_{\text{gutter}}$) to eliminate crease remnants.<br>3. Add split-boundary noise exclusion zone in `ContentBoxDetector`.<br>4. Auto-prune blank sub-page slices ($< 0.5\%$ ink).<br>5. Implement publication margin defaults (0.25″ vertical, 0.50″ horizontal).<br>6. Expose `--margins`, `--page-range`, and `--exclude-pages`. |
-| **Phase 3** | **Tesseract OCR Integration** | 1. Implement `TesseractOCREngine` conforming to `OCREngine`.<br>2. Expose `--ocr-engine` and `--languages` in CLI.<br>3. Add Ancient Greek polytonic test fixtures. |
+To execute the architectural improvements reliably and without regression, each phase has been analyzed to determine whether it can be safely delivered in a **single step** or requires decomposition into **multiple substeps**. For every substep, an optimal AI model (**Flash 3.8** vs. **Argon 4**) and **effort level** (`low`, `medium`, `high`) are recommended based on algorithmic complexity, concurrency constraints, and domain scope.
+
+### 7.1 High-Level Roadmap & Model Assignment Matrix
+
+| Phase | Title | Execution Strategy | Substeps | Recommended Model | Effort Level | Target Subsystems |
+| :--- | :--- | :--- | :---: | :--- | :---: | :--- |
+| **Phase 1** | **Core Calibration & Font Optimization** | **One Step**<br>*(or 2 substeps)* | 1–2 | **Flash 3.8** | **Medium** *(Consolidated)*<br>Low / Med *(Substeps)* | `SkewEstimator`, `ApplePDFDocumentWriter` |
+| **Phase 2** | **Spine Crease, Gutter & Content Filtering** | **Multiple Substeps** | 5 | **Argon 4** (2.1, 2.3)<br>**Flash 3.8** (2.2, 2.4, 2.5) | High / Med / Low | `PageSplitEstimator`, `ContentBoxDetector`, `MarginHarmonizer`, `BookPipelineCoordinator`, CLI |
+| **Phase 3** | **Classical Language OCR (Tesseract)** | **Multiple Substeps** | 2 | **Argon 4** (3.1)<br>**Flash 3.8** (3.2) | High / Medium | `ScanTailorTesseractBackend`, C-FFI, Pipeline Dispatch, CLI |
+
+---
+
+### 7.2 Phase 1: Core Calibration & Font Optimization
+
+#### Execution Decision: Single Step (Can be executed in One Step)
+- **Rationale:** Phase 1 touches only two completely independent, non-interacting files (`SkewEstimator.swift` in `ScanTailorCore` and `ApplePDFDocumentWriter.swift` in `ScanTailorAppleBackend`). Neither task involves complex multi-pass coordination or geometric state machines. The confidence denominator is a mathematical formula adjustment, while the font deduplication replaces per-glyph font instantiation with a single shared base font.
+- **Single-Step Recommendation:**
+  - **Recommended Model:** **Flash 3.8**
+  - **Effort Level:** **Medium**
+  - **Success Criteria:** `swift test` passes; `flannery.1993.pdf` file size shrinks from 5.3 MB to ~1.4 MB with zero false-positive confidence warnings.
+
+#### Optional Substep Decomposition (for incremental verification)
+If incremental testing and verification are desired, Phase 1 can be divided into two lightweight substeps:
+
+1. **Substep 1.1: Recalibrate `SkewEstimator` Confidence Metric**
+   - **Scope:** Update the energy ratio scaling formula in `SkewEstimator.swift` line 193:
+     ```swift
+     let confidence = min(1.0, max(0.0, (ratio - 1.0) / 1.5))
+     ```
+     Verify that clean text pages produce confidence $\ge 0.75$, eliminating false-positive pipeline warnings. Update unit test assertions in `DeskewTests.swift`.
+   - **Recommended Model:** **Flash 3.8**
+   - **Effort Level:** **Low**
+   - **Target Files:** `Sources/ScanTailorCore/Deskew/SkewEstimator.swift`, `Tests/ScanTailorTests/DeskewTests.swift`
+
+2. **Substep 1.2: PDF Font Stream Deduplication via Text Matrix Scaling**
+   - **Scope:** Refactor `ApplePDFDocumentWriter.swift` to instantiate a single canonical 12 pt `CTFont` (e.g., `Helvetica`) once per document. For each invisible OCR text observation, calculate uniform horizontal/vertical scale factors and apply them via `CGPDFContext.setTextMatrix` or `CGAffineTransform` rather than creating distinct dynamic fonts.
+   - **Recommended Model:** **Flash 3.8**
+   - **Effort Level:** **Medium**
+   - **Target Files:** `Sources/ScanTailorAppleBackend/ApplePDFDocumentWriter.swift`
+
+---
+
+### 7.3 Phase 2: Spine Crease, Gutter Detection, Content Filtering & Margins
+
+#### Execution Decision: Multiple Substeps (Requires 5 Substeps)
+- **Rationale:** Phase 2 cannot be executed safely in a single step. It spans 4 distinct pipeline layers (gutter finding, physical slicing, morphological clustering, and book-wide margin harmonization). If implemented as a single monolith, debugging failures in split-line tracking versus morphological noise bridging becomes virtually impossible. Breaking Phase 2 into 5 modular substeps isolates geometric estimation from raster masking and layout normalization.
+
+#### Substep Decomposition
+
+1. **Substep 2.1: Dual-Mode Gutter Detection & Dark Crease Centerline Tracking**
+   - **Scope:** Enhance `PageSplitEstimator.swift` with continuous vertical ink analysis ($\ge 75\%$ dark pixel continuity along candidate columns). When a prominent dark line or binding shadow is detected, dynamically switch from White Valley Mode to Dark Crease Mode. In Dark Crease Mode, reformulate the cost function to **maximize** alignment with the dark crease midline rather than penalizing corridor ink.
+   - **Recommended Model:** **Argon 4** (requires advanced mathematical reasoning to optimize continuous 1D cost landscapes across tilted angles $\phi \in [-3^\circ, +3^\circ]$ without falling into local minima).
+   - **Effort Level:** **High**
+   - **Target Files:** `Sources/ScanTailorCore/Layout/PageSplitEstimator.swift`, `Tests/ScanTailorTests/PageSplitTests.swift`
+
+2. **Substep 2.2: Central Gutter Strip Trimming (Physical Crease Cutout)**
+   - **Scope:** Introduce configurable central gutter strip trimming width ($W_{\text{gutter}} \in [10, 40]\text{ px}$, default: $24\text{ px}$) in `PageSplitEstimator.swift` and `BookPipelineCoordinator.swift`. Modify the slice geometry so that the left sub-page bounds terminate at $X_{\text{split}} - W_{\text{gutter}} / 2$ and the right sub-page bounds begin at $X_{\text{split}} + W_{\text{gutter}} / 2$. Update coordinate offset translations so that downstream stages remain aligned.
+   - **Recommended Model:** **Flash 3.8** (clean geometric boundary math, coordinate translations, and image slice extraction).
+   - **Effort Level:** **Medium**
+   - **Target Files:** `Sources/ScanTailorCore/Layout/PageSplitEstimator.swift`, `Sources/ScanTailorPipeline/BookPipelineCoordinator.swift`
+
+3. **Substep 2.3: Split-Boundary Noise Exclusion Zone in `ContentBoxDetector`**
+   - **Scope:** In `ContentBoxDetector.swift`, add `splitEdgeExclusionFraction` (default: $0.04$, i.e. 4% of sub-page width). On sliced sub-pages (`.leftVerso` inner right margin, `.rightRecto` inner left margin), apply a directional mask along the cut margin prior to morphological closing (`closeBrick(64, 14)`). This prevents any residual crease ink from bridging into the text column and ensures crease clusters are classified as peripheral noise.
+   - **Recommended Model:** **Argon 4** (delicate morphological tuning needed to prevent false-positive masking of valid body text, headers, or marginal annotations while guaranteeing crease disconnection).
+   - **Effort Level:** **Medium**
+   - **Target Files:** `Sources/ScanTailorCore/Layout/ContentBoxDetector.swift`, `Tests/ScanTailorTests/ContentBoxTests.swift`
+
+4. **Substep 2.4: Blank Sub-Page Auto-Pruning & Layout Outlier Filtering**
+   - **Scope:** In `BookPipelineCoordinator.swift`, implement automatic detection and pruning of blank sub-page slices (foreground ink density $< 0.5\%$ and 0 recognized OCR words, eliminating phantom pages like Page 1 in Vermeersch scan 1). In `MarginHarmonizer.swift`, implement interquartile range (IQR) outlier filtering on content box dimensions to prevent standalone title pages or oversize foldouts from expanding the canonical text frame.
+   - **Recommended Model:** **Flash 3.8** (clear statistical filtering rules and page list pruning).
+   - **Effort Level:** **Medium**
+   - **Target Files:** `Sources/ScanTailorPipeline/BookPipelineCoordinator.swift`, `Sources/ScanTailorCore/Layout/MarginHarmonizer.swift`
+
+5. **Substep 2.5: Publication Margin Engine & CLI Configuration Options**
+   - **Scope:** Set default publication margins relative to the detected text block to **0.25″ (top/bottom)** and **0.50″ (left/right)**. In `scantailor-cli`, expose and parse `--margins "top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"`, `--page-range <range>`, `--exclude-pages <list>`, and `--first-page-side <recto|verso>`. Pass parsed parameters through `BookPipelineCoordinator`.
+   - **Recommended Model:** **Flash 3.8** (CLI argument parsing, configuration passing, and layout padding calculations).
+   - **Effort Level:** **Low**
+   - **Target Files:** `Sources/ScanTailorCore/Layout/MarginHarmonizer.swift`, `Sources/scantailor-cli/main.swift`, `Sources/ScanTailorPipeline/BookPipelineCoordinator.swift`
+
+---
+
+### 7.4 Phase 3: Classical Language OCR (Tesseract Integration)
+
+#### Execution Decision: Multiple Substeps (Requires 2 Substeps)
+- **Rationale:** Integrating an external C library (`libtesseract` / `liblept`) with pure Swift 6 strict concurrency (`-Xswiftc -warnings-as-errors`, Sendable conformance, and `@preconcurrency` boundaries) involves low-level pointer management and memory safety. Decoupling the C engine wrapper from pipeline integration and linguistic evaluation ensures engine stability before wiring CLI flags and tests.
+
+#### Substep Decomposition
+
+1. **Substep 3.1: Swift 6 `libtesseract` C Bridging & `TesseractOCREngine` Implementation**
+   - **Scope:** Create a new module `Sources/ScanTailorTesseractBackend/` implementing `TesseractOCREngine: OCREngine`. Implement C FFI bindings to `libtesseract` and `liblept` (Leptonica) via SPM system library or C wrapper target. Feed `GrayscaleImage` / `BinaryBitmap` rasters, manage initialization of language dictionaries (`grc`, `deu_frak`, `lat`, `eng`), extract UTF-8 text and bounding boxes via `TessResultIterator`, perform coordinate transformation (inverting bottom-left origin to ScanTailor top-left), and ensure complete `Sendable` concurrency safety.
+   - **Recommended Model:** **Argon 4** (complex C-pointer memory lifecycle management, Swift 6 concurrency safety, Sendable isolation, and coordinate space transformations).
+   - **Effort Level:** **High**
+   - **Target Files:** `Package.swift`, `Sources/ScanTailorTesseractBackend/`, `Tests/ScanTailorTesseractTests/`
+
+2. **Substep 3.2: Pipeline Multi-Engine Dispatch & CLI Integration**
+   - **Scope:** In `scantailor-cli`, expose `--ocr-engine <apple|tesseract>` (defaulting to `apple` on macOS) and `--languages <codes>` (e.g., `grc+lat`). In `BookPipelineCoordinator.swift`, instantiate and dispatch to the selected engine. Add Ancient Greek polytonic test fixtures and verification suite comparing Apple Vision vs Tesseract accuracy and execution latency.
+   - **Recommended Model:** **Flash 3.8** (straightforward coordinator wiring, CLI option validation, and test harness setup).
+   - **Effort Level:** **Medium**
+   - **Target Files:** `Sources/ScanTailorPipeline/BookPipelineCoordinator.swift`, `Sources/scantailor-cli/main.swift`, `Tests/`
+
+---
+
+### 7.5 Model Selection & Effort Level Guidelines
+
+1. **When to use Argon 4 (High / Medium Effort):**
+   - **Algorithmic Inversion & 1D/2D Optimizers:** Formulating new mathematical cost landscapes (e.g., Substep 2.1 Dark Crease centerline peak-seeking vs. White Valley ink cost).
+   - **Morphological Sensitivity & Noise Discrimination:** Tuning pre-closing boundary masks (Substep 2.3) where over-masking damages text and under-masking corrupts page bounds.
+   - **Low-Level C-FFI & Concurrency:** Bridging external C libraries (`libtesseract`, `liblept`) in pure Swift 6 under strict concurrency checking with zero warnings (Substep 3.1).
+
+2. **When to use Flash 3.8 (Low / Medium Effort):**
+   - **Formula & Denominator Tweaks:** Direct recalibration of established mathematical equations (Substep 1.1).
+   - **Quartz / CoreGraphics Matrix Refactoring:** Reusing single `CTFont` instances and scaling via `CGContextSetTextMatrix` (Substep 1.2).
+   - **Geometric Slicing & Boundary Math:** Gutter strip excision and coordinate offsets (Substep 2.2).
+   - **Heuristic Filtering & Statistical Logic:** IQR outlier rejection and blank slice pruning (Substep 2.4).
+   - **CLI Interfaces & Plumbing:** Command-line argument parsing, options dispatch, and test fixtures (Substep 2.5, Substep 3.2).
 
 ---
 
