@@ -68,6 +68,7 @@ public struct ScanTailorCLI {
         public var diagnosticsDirPath: String?
         public var splitMode: PageSplitMode = .automatic
         public var gutterTrimWidth: Int = 24
+        public var autoPruneBlankPages: Bool = true
         public var enableDewarp: Bool = true
         public var enableOCR: Bool = true
         public var binarizationMethod: AdaptiveBinarizer.Method = .wolfJolion
@@ -109,6 +110,7 @@ public struct ScanTailorCLI {
         var diagnosticsDirPath: String? = nil
         var splitMode: PageSplitMode = .automatic
         var gutterTrimWidth = 24
+        var autoPruneBlankPages = true
         var enableDewarp = true
         var enableOCR = true
         var binarizeMethod: AdaptiveBinarizer.Method = .wolfJolion
@@ -167,6 +169,9 @@ public struct ScanTailorCLI {
             case "--no-dewarp":
                 enableDewarp = false
                 i += 1
+            case "--no-auto-prune", "--no-blank-pruning":
+                autoPruneBlankPages = false
+                i += 1
             case "--no-ocr":
                 enableOCR = false
                 i += 1
@@ -203,6 +208,7 @@ public struct ScanTailorCLI {
         opts.diagnosticsDirPath = diagnosticsDirPath
         opts.splitMode = splitMode
         opts.gutterTrimWidth = gutterTrimWidth
+        opts.autoPruneBlankPages = autoPruneBlankPages
         opts.enableDewarp = enableDewarp
         opts.enableOCR = enableOCR
         opts.binarizationMethod = binarizeMethod
@@ -252,6 +258,7 @@ public struct ScanTailorCLI {
             outputDPI: 300,
             splitMode: options.splitMode,
             gutterTrimWidth: options.gutterTrimWidth,
+            autoPruneBlankPages: options.autoPruneBlankPages,
             enableDewarp: options.enableDewarp,
             binarizerConfiguration: binConfig
         )
@@ -346,6 +353,12 @@ public struct ScanTailorCLI {
         lines.append("Verso Canonical Text Frame: \(manifest.versoCanonicalFrame.width) x \(manifest.versoCanonicalFrame.height) at (\(manifest.versoCanonicalFrame.minX), \(manifest.versoCanonicalFrame.minY))")
         lines.append("Recto Canonical Text Frame: \(manifest.rectoCanonicalFrame.width) x \(manifest.rectoCanonicalFrame.height) at (\(manifest.rectoCanonicalFrame.minX), \(manifest.rectoCanonicalFrame.minY))")
         lines.append("Total Output Pages: \(manifest.pages.count) (from \(manifest.sourcePageSplits.count) source scan(s))")
+        if !manifest.prunedPages.isEmpty {
+            lines.append("Pruned Blank Sub-Pages: \(manifest.prunedPages.count)")
+            for pruned in manifest.prunedPages {
+                lines.append("  - Source scan #\(pruned.sourcePageIndex + 1) (\(pruned.splitSide.rawValue)): \(pruned.reason)")
+            }
+        }
         lines.append("-----------------------------------------")
         for page in manifest.pages {
             let skewStr = String(format: "%+.2f°", page.skewAngleDegrees)
@@ -370,6 +383,7 @@ public struct ScanTailorCLI {
       --split-mode <mode>          Spread split mode: automatic (default), single, spread
       --gutter-trim-width <px>     Central gutter strip trimming width in px at 600 DPI (default: 24)
       --binarize <method>          Adaptive thresholding: wolf (default) or sauvola
+      --no-auto-prune              Disable automatic pruning of blank sub-page slices
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping
       --no-ocr                     Disable Vision OCR searchable text layer
       --portable-backend           Use pure-Swift portable compute accelerator instead of Metal GPU

@@ -278,6 +278,180 @@ struct ContentBoxAndMarginTests {
         #expect(output2.manifest.pages[1].layoutPlan.destinationOrigin == customOrigin)
     }
 
+    @Test("MarginHarmonizer IQR and median outlier rejection prevents foldouts and title pages from corrupting canonical dimensions")
+    func testMarginHarmonizerIQROutlierRejectionExcludesFoldoutsAndTitlePages() {
+        // Direct testing of filterOutliersIQR
+        let sampleWidths = [1200, 1995, 2000, 2000, 2005, 4000] // 1200 is title page, 4000 is foldout
+        let filteredWidths = MarginHarmonizer.filterOutliersIQR(sampleWidths)
+        #expect(filteredWidths == [1995, 2000, 2000, 2005])
+
+        let sampleHeights = [600, 3190, 3200, 3200, 3200, 3210] // 600 is title page
+        let filteredHeights = MarginHarmonizer.filterOutliersIQR(sampleHeights)
+        #expect(filteredHeights == [3190, 3200, 3200, 3200, 3210])
+
+        // Book-wide harmonization test with 4 standard body pages, 1 oversized foldout, and 1 short title page
+        let pageSize = Size2I(width: 1200, height: 1800)
+        let bodyRect = Rect2I(x: 220, y: 240, width: 760, height: 1320)
+        let foldoutRect = Rect2I(x: 100, y: 240, width: 1800, height: 1320)
+        let titleRect = Rect2I(x: 400, y: 700, width: 400, height: 280)
+
+        func makeDet(box: Rect2I) -> ContentBoxDetector.DetectionResult {
+            ContentBoxDetector.DetectionResult(
+                contentBox: box,
+                mainBodyBox: box,
+                retainedClusters: [.init(exactBounds: box, foregroundPixels: 100_000)],
+                rejectedBoxes: [],
+                confidence: 0.99
+            )
+        }
+
+        let p0 = MarginHarmonizer.PageInput(pageIndex: 0, side: .recto, pageSize: pageSize, dpi: 600, detection: makeDet(box: titleRect))
+        let p1 = MarginHarmonizer.PageInput(pageIndex: 1, side: .verso, pageSize: pageSize, dpi: 600, detection: makeDet(box: bodyRect))
+        let p2 = MarginHarmonizer.PageInput(pageIndex: 2, side: .recto, pageSize: pageSize, dpi: 600, detection: makeDet(box: bodyRect))
+        let p3 = MarginHarmonizer.PageInput(pageIndex: 3, side: .verso, pageSize: pageSize, dpi: 600, detection: makeDet(box: bodyRect))
+        let p4 = MarginHarmonizer.PageInput(pageIndex: 4, side: .recto, pageSize: pageSize, dpi: 600, detection: makeDet(box: bodyRect))
+        let p5 = MarginHarmonizer.PageInput(pageIndex: 5, side: .verso, pageSize: Size2I(width: 2200, height: 1800), dpi: 600, detection: makeDet(box: foldoutRect))
+
+        let harmonizer = MarginHarmonizer(
+            configuration: MarginHarmonizer.Configuration(
+                canonicalHorizontalMarginAt600DPI: 220,
+                canonicalVerticalMarginAt600DPI: 240
+            )
+        )
+        let model = harmonizer.harmonizeBook(pages: [p0, p1, p2, p3, p4, p5])
+
+        // Verify that canonical width and height are strictly locked to the 760 x 1320 body pages
+        #expect(model.rectoCanonicalFrame.width == 760)
+        #expect(model.rectoCanonicalFrame.height == 1320)
+        #expect(model.versoCanonicalFrame.width == 760)
+        #expect(model.versoCanonicalFrame.height == 1320)
+
+        // Verify that the title page and foldout are placed in Tier 3 (standaloneFloating)
+        #expect(model.pagePlans[0].tier == .standaloneFloating)
+        #expect(model.pagePlans[5].tier == .standaloneFloating)
+
+        // Standard body pages must remain Tier 1 (fullBody)
+        #expect(model.pagePlans[1].tier == .fullBody)
+        #expect(model.pagePlans[2].tier == .fullBody)
+        #expect(model.pagePlans[3].tier == .fullBody)
+        #expect(model.pagePlans[4].tier == .fullBody)
+    }
+
+    @Test("BookPipelineCoordinator auto-prunes blank sub-page slices and records telemetry in manifest")
+    func testBlankSubPageAutoPruningEliminatesPhantomFlyleaf() async throws {
+        let width = 1200
+        let height = 800
+
+        // Create a 2-page spread where the left half (0..<600) is a blank flyleaf (pure background 245),
+        // and the right half (600..<1200) has dense text lines (ink density > 1%).
+        var spreadScan = GrayscaleBuffer(width: width, height: height, dpi: 600, initialValue: 245)
+        for lineY in stride(from: 140, through: 660, by: 36) {
+            for y in lineY..<(lineY + 16) {
+                for x in 700..<1100 where (x % 14) < 10 {
+                    spreadScan[x, y] = 20
+                }
+            }
+        }
+
+        let accelerator = PortableComputeAccelerator()
+
+        // 1. With autoPruneBlankPages = true (default):
+        let coordinatorAuto = BookPipelineCoordinator(
+            configuration: BookPipelineCoordinator.Configuration(
+                processingDPI: 600,
+                outputDPI: 300,
+                splitMode: .twoPageSpread,
+                autoPruneBlankPages: true,
+                enableDewarp: false
+            )
+        )
+        let writer1 = MockPDFDocumentWriter()
+        let output1 = try await coordinatorAuto.processGrayscalePages(
+            [spreadScan],
+            writer: writer1,
+            accelerator: accelerator,
+            ocrEngine: nil
+        )
+
+        // The blank left sub-page should be pruned; only 1 output page remains (the right recto page)
+        #expect(output1.manifest.pages.count == 1)
+        #expect(output1.outputBitmapsAtOutputDPI.count == 1)
+        #expect(output1.manifest.prunedPages.count == 1)
+        #expect(output1.manifest.prunedPages[0].splitSide == .leftVerso)
+        #expect(output1.manifest.pages[0].splitSide == .rightRecto)
+        #expect(output1.manifest.pages[0].bookSide == .recto)
+        #expect(output1.manifest.pages[0].outputPageIndex == 0)
+
+        // 2. With autoPruneBlankPages = false:
+        let coordinatorNoPrune = BookPipelineCoordinator(
+            configuration: BookPipelineCoordinator.Configuration(
+                processingDPI: 600,
+                outputDPI: 300,
+                splitMode: .twoPageSpread,
+                autoPruneBlankPages: false,
+                enableDewarp: false
+            )
+        )
+        let writer2 = MockPDFDocumentWriter()
+        let output2 = try await coordinatorNoPrune.processGrayscalePages(
+            [spreadScan],
+            writer: writer2,
+            accelerator: accelerator,
+            ocrEngine: nil
+        )
+
+        // Both pages must be retained when pruning is disabled
+        #expect(output2.manifest.pages.count == 2)
+        #expect(output2.manifest.prunedPages.isEmpty)
+    }
+
+    @Test("BookPipelineCoordinator preserves sparse sub-page when OCR detects recognized text")
+    func testBlankSubPageAutoPruningPreservesPageWithOCRWords() async throws {
+        let width = 600
+        let height = 800
+
+        // Create a page with very sparse text (a single small line, ink density < 0.2%)
+        var sparseScan = GrayscaleBuffer(width: width, height: height, dpi: 600, initialValue: 245)
+        for y in 400..<412 {
+            for x in 280..<320 {
+                sparseScan[x, y] = 20
+            }
+        }
+
+        let accelerator = PortableComputeAccelerator()
+        let coordinator = BookPipelineCoordinator(
+            configuration: BookPipelineCoordinator.Configuration(
+                processingDPI: 600,
+                outputDPI: 300,
+                splitMode: .singlePage,
+                autoPruneBlankPages: true,
+                blankPageInkDensityThreshold: 0.005,
+                enableDewarp: false
+            )
+        )
+
+        // Mock OCR engine returns 1 recognized word ("FINIS")
+        let mockOCR = MockTextOCREngine(wordsToReturn: [
+            RecognizedTextObservation(
+                text: "FINIS",
+                confidence: 0.99,
+                boundingBox: Rect2D(x: 0.45, y: 0.50, width: 0.10, height: 0.02)
+            )
+        ])
+
+        let writer = MockPDFDocumentWriter()
+        let output = try await coordinator.processGrayscalePages(
+            [sparseScan],
+            writer: writer,
+            accelerator: accelerator,
+            ocrEngine: mockOCR
+        )
+
+        // Page must NOT be pruned because OCR confirmed the presence of text
+        #expect(output.manifest.pages.count == 1)
+        #expect(output.manifest.prunedPages.isEmpty)
+    }
+
     // MARK: - Test Helpers
 
     private func fillTextBlock(_ bitmap: inout BinaryBitmap, rect: Rect2I) {
@@ -318,5 +492,17 @@ private struct MockPDFDocumentWriter: PDFDocumentWriter, ~Copyable {
 
     consuming func finalize() throws(PDFWriteError) {
         // No-op for in-memory test mock
+    }
+}
+
+private struct MockTextOCREngine: OCREngine {
+    let wordsToReturn: [RecognizedTextObservation]
+
+    func recognizeText(
+        in bitmap: borrowing BinaryBitmap,
+        dpi: Int,
+        languages: [String]
+    ) async throws(OCRError) -> [RecognizedTextObservation] {
+        wordsToReturn
     }
 }

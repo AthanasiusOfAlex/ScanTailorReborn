@@ -44,6 +44,10 @@ public struct MarginHarmonizer: Sendable {
         public var minPartialHeightFraction: Double
         /// Maximum fractional width excess above the 75th-percentile content width before Pass 2 outlier trimming triggers.
         public var pass2OutlierWidthExcessFraction: Double
+        /// Maximum allowed fractional deviation from median content box dimension before IQR/median outlier exclusion (default: 0.25).
+        public var canonicalDimensionOutlierToleranceFraction: Double
+        /// Interquartile range (IQR) multiplier for canonical frame outlier filtering (default: 1.5).
+        public var canonicalDimensionIQROutlierMultiplier: Double
 
         public init(
             canonicalHorizontalMarginAt600DPI: Int = 300,
@@ -51,7 +55,9 @@ public struct MarginHarmonizer: Sendable {
             fullWidthToleranceFraction: Double = 0.08,
             fullHeightToleranceFraction: Double = 0.08,
             minPartialHeightFraction: Double = 0.22,
-            pass2OutlierWidthExcessFraction: Double = 0.10
+            pass2OutlierWidthExcessFraction: Double = 0.10,
+            canonicalDimensionOutlierToleranceFraction: Double = 0.25,
+            canonicalDimensionIQROutlierMultiplier: Double = 1.5
         ) {
             self.canonicalHorizontalMarginAt600DPI = max(0, canonicalHorizontalMarginAt600DPI)
             self.canonicalVerticalMarginAt600DPI = max(0, canonicalVerticalMarginAt600DPI)
@@ -59,6 +65,8 @@ public struct MarginHarmonizer: Sendable {
             self.fullHeightToleranceFraction = min(max(0.01, fullHeightToleranceFraction), 0.30)
             self.minPartialHeightFraction = min(max(0.05, minPartialHeightFraction), 0.85)
             self.pass2OutlierWidthExcessFraction = min(max(0.02, pass2OutlierWidthExcessFraction), 0.50)
+            self.canonicalDimensionOutlierToleranceFraction = min(max(0.05, canonicalDimensionOutlierToleranceFraction), 1.0)
+            self.canonicalDimensionIQROutlierMultiplier = min(max(0.5, canonicalDimensionIQROutlierMultiplier), 5.0)
         }
     }
 
@@ -196,7 +204,12 @@ public struct MarginHarmonizer: Sendable {
         // if substantial body pages exist.
         let substantialWidths = rawBoxes.map(\.width).filter { $0 >= medianPageWidth * 35 / 100 }
         let widthSamplesForPrior = substantialWidths.isEmpty ? rawBoxes.map(\.width) : substantialWidths
-        let priorCanonicalWidth = Self.percentileInt(widthSamplesForPrior, p: 0.75) ?? (medianPageWidth * 70 / 100)
+        let filteredWidthSamples = Self.filterOutliersIQR(
+            widthSamplesForPrior,
+            maxDeviationFraction: configuration.canonicalDimensionOutlierToleranceFraction,
+            iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
+        )
+        let priorCanonicalWidth = Self.percentileInt(filteredWidthSamples, p: 0.75) ?? (medianPageWidth * 70 / 100)
 
         // Step 2: Run Pass 2 outlier refinement on any page whose raw content box exceeds
         // priorCanonicalWidth * (1 + pass2OutlierWidthExcessFraction).
@@ -217,16 +230,31 @@ public struct MarginHarmonizer: Sendable {
         }
 
         // Step 3: Estimate canonical text width W_canon and height H_canon from the 85th percentile
-        // of refined body-candidate boxes.
+        // of refined body-candidate boxes, with IQR and median deviation outlier rejection to prevent
+        // standalone title pages or oversize foldouts from expanding the canonical text frame.
         let refinedBoxes = refinedDetections.compactMap(\.contentBox).filter { !$0.isEmpty }
         let bodyCandidateBoxes = refinedBoxes.filter { box in
             box.width >= priorCanonicalWidth * 75 / 100
         }
         let referenceBoxes = bodyCandidateBoxes.isEmpty ? refinedBoxes : bodyCandidateBoxes
 
-        let canonicalTextWidth = Self.percentileInt(referenceBoxes.map(\.width), p: 0.85)
+        let candidateWidths = referenceBoxes.map(\.width)
+        let candidateHeights = referenceBoxes.map(\.height)
+
+        let filteredWidths = Self.filterOutliersIQR(
+            candidateWidths,
+            maxDeviationFraction: configuration.canonicalDimensionOutlierToleranceFraction,
+            iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
+        )
+        let filteredHeights = Self.filterOutliersIQR(
+            candidateHeights,
+            maxDeviationFraction: configuration.canonicalDimensionOutlierToleranceFraction,
+            iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
+        )
+
+        let canonicalTextWidth = Self.percentileInt(filteredWidths, p: 0.85)
             ?? max(1, medianPageWidth - 2 * hMargin)
-        let canonicalTextHeight = Self.percentileInt(referenceBoxes.map(\.height), p: 0.85)
+        let canonicalTextHeight = Self.percentileInt(filteredHeights, p: 0.85)
             ?? max(1, medianPageHeight - 2 * vMargin)
 
         // Determine uniform output canvas size:
@@ -448,7 +476,43 @@ public struct MarginHarmonizer: Sendable {
         return canvas
     }
 
-    // MARK: - Private Statistical Helpers
+    // MARK: - Statistical Helpers
+
+    /// Filters an array of integer dimensions using Interquartile Range (IQR) and median deviation rules.
+    ///
+    /// Values outside `[Q1 - iqrMultiplier * IQR, Q3 + iqrMultiplier * IQR]` or deviating by more than
+    /// `maxDeviationFraction` from the median are rejected.
+    /// If all values would be rejected (e.g. extremely small or dispersed sample), returns the input values unchanged.
+    public static func filterOutliersIQR(
+        _ values: [Int],
+        maxDeviationFraction: Double = 0.25,
+        iqrMultiplier: Double = 1.5
+    ) -> [Int] {
+        guard values.count >= 3 else { return values }
+        let sorted = values.sorted()
+        guard let q1 = percentileInt(sorted, p: 0.25),
+              let median = percentileInt(sorted, p: 0.50),
+              let q3 = percentileInt(sorted, p: 0.75),
+              median > 0 else {
+            return values
+        }
+
+        let rawIQR = Double(max(0, q3 - q1))
+        // Protect against zero/near-zero IQR in highly uniform pages by establishing a minimum scale proportional to the median.
+        let effectiveIQR = max(rawIQR, Double(median) * 0.05)
+        let lowerFence = Double(q1) - iqrMultiplier * effectiveIQR
+        let upperFence = Double(q3) + iqrMultiplier * effectiveIQR
+        let maxDeviation = Double(median) * maxDeviationFraction
+
+        let filtered = sorted.filter { val in
+            let dVal = Double(val)
+            let withinIQRFence = dVal >= lowerFence && dVal <= upperFence
+            let withinMedianTolerance = abs(dVal - Double(median)) <= maxDeviation
+            return withinIQRFence && withinMedianTolerance
+        }
+
+        return filtered.isEmpty ? values : filtered
+    }
 
     private static func percentileInt(_ values: [Int], p: Double) -> Int? {
         guard !values.isEmpty else { return nil }

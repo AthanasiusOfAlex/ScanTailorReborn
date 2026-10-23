@@ -94,6 +94,30 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
     }
 }
 
+/// Telemetry record for a sub-page slice pruned during processing (e.g. blank flyleaf or phantom spread half).
+public struct PrunedPageRecord: Sendable, Equatable, Codable {
+    /// Zero-based source scan index from which this slice originated.
+    public var sourcePageIndex: Int
+    /// Split slice side (`.single`, `.leftVerso`, or `.rightRecto`).
+    public var splitSide: PageSide
+    /// Measured foreground ink density in `[0, 1]`.
+    public var inkDensity: Double
+    /// Human-readable explanation of why this slice was pruned.
+    public var reason: String
+
+    public init(
+        sourcePageIndex: Int,
+        splitSide: PageSide,
+        inkDensity: Double,
+        reason: String
+    ) {
+        self.sourcePageIndex = sourcePageIndex
+        self.splitSide = splitSide
+        self.inkDensity = inkDensity
+        self.reason = reason
+    }
+}
+
 /// Persistent JSON manifest capturing book-wide canonical layout frames, per-spread split decisions,
 /// per-page telemetry, and optional user overrides.
 public struct BookProcessingManifest: Sendable, Equatable, Codable {
@@ -111,6 +135,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     public var sourcePageSplits: [PageSplitDecision]
     /// Per-output-page processing records.
     public var pages: [PageProcessingRecord]
+    /// Sub-page slices pruned during processing (e.g. blank flyleaves or phantom spread halves).
+    public var prunedPages: [PrunedPageRecord]
 
     public init(
         processingDPI: Int,
@@ -119,7 +145,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         versoCanonicalFrame: Rect2I,
         rectoCanonicalFrame: Rect2I,
         sourcePageSplits: [PageSplitDecision],
-        pages: [PageProcessingRecord]
+        pages: [PageProcessingRecord],
+        prunedPages: [PrunedPageRecord] = []
     ) {
         self.processingDPI = processingDPI
         self.outputDPI = outputDPI
@@ -128,6 +155,30 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.rectoCanonicalFrame = rectoCanonicalFrame
         self.sourcePageSplits = sourcePageSplits
         self.pages = pages
+        self.prunedPages = prunedPages
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case processingDPI
+        case outputDPI
+        case canonicalCanvasSizeAtProcessingDPI
+        case versoCanonicalFrame
+        case rectoCanonicalFrame
+        case sourcePageSplits
+        case pages
+        case prunedPages
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.processingDPI = try container.decode(Int.self, forKey: .processingDPI)
+        self.outputDPI = try container.decode(Int.self, forKey: .outputDPI)
+        self.canonicalCanvasSizeAtProcessingDPI = try container.decode(Size2I.self, forKey: .canonicalCanvasSizeAtProcessingDPI)
+        self.versoCanonicalFrame = try container.decode(Rect2I.self, forKey: .versoCanonicalFrame)
+        self.rectoCanonicalFrame = try container.decode(Rect2I.self, forKey: .rectoCanonicalFrame)
+        self.sourcePageSplits = try container.decode([PageSplitDecision].self, forKey: .sourcePageSplits)
+        self.pages = try container.decode([PageProcessingRecord].self, forKey: .pages)
+        self.prunedPages = try container.decodeIfPresent([PrunedPageRecord].self, forKey: .prunedPages) ?? []
     }
 }
 
@@ -150,6 +201,10 @@ public struct BookPipelineCoordinator: Sendable {
         /// Central gutter strip trimming width in pixels at 600 DPI physically removed between split pages (default: `24`).
         /// Scaled proportionally when `processingDPI` differs from 600 DPI.
         public var gutterTrimWidth: Int
+        /// Whether to automatically detect and prune blank sub-page slices (default: `true`).
+        public var autoPruneBlankPages: Bool
+        /// Maximum foreground ink density threshold (fraction in `[0, 1]`) to qualify as a blank page candidate (default: `0.005`, i.e. 0.5%).
+        public var blankPageInkDensityThreshold: Double
         /// Whether 3D cubic-sheet curvature dewarping is enabled (default: `true`).
         public var enableDewarp: Bool
         /// Minimum vertical sag in pixels (at 600 DPI) required to trigger 3D dewarping; flatter pages bypass resampling (default: `12.0`).
@@ -172,6 +227,8 @@ public struct BookPipelineCoordinator: Sendable {
             outputDPI: Int = 300,
             splitMode: PageSplitMode = .automatic,
             gutterTrimWidth: Int = 24,
+            autoPruneBlankPages: Bool = true,
+            blankPageInkDensityThreshold: Double = 0.005,
             enableDewarp: Bool = true,
             minDewarpSagPixelsAt600DPI: Double = 12.0,
             binarizerConfiguration: AdaptiveBinarizer.Configuration = AdaptiveBinarizer.Configuration(
@@ -188,6 +245,8 @@ public struct BookPipelineCoordinator: Sendable {
             self.outputDPI = max(72, outputDPI)
             self.splitMode = splitMode
             self.gutterTrimWidth = max(0, gutterTrimWidth)
+            self.autoPruneBlankPages = autoPruneBlankPages
+            self.blankPageInkDensityThreshold = min(max(0.0001, blankPageInkDensityThreshold), 0.10)
             self.enableDewarp = enableDewarp
             self.minDewarpSagPixelsAt600DPI = max(1.0, minDewarpSagPixelsAt600DPI)
             self.binarizerConfiguration = binarizerConfiguration
@@ -308,6 +367,7 @@ public struct BookPipelineCoordinator: Sendable {
         var sourceSplits: [PageSplitDecision] = []
         sourceSplits.reserveCapacity(sourcePages.count)
         var pass1Pages: [Pass1Page] = []
+        var prunedPages: [PrunedPageRecord] = []
 
         let dpiScale = Double(configuration.processingDPI) / 600.0
         let minSagPixels = configuration.minDewarpSagPixelsAt600DPI * dpiScale
@@ -407,6 +467,55 @@ public struct BookPipelineCoordinator: Sendable {
                         rejectedBoxes: detection.rejectedBoxes,
                         confidence: 1.0
                     )
+                }
+
+                // 1d. Blank sub-page auto-pruning check
+                if configuration.autoPruneBlankPages && manualOverride == nil {
+                    let totalPixels = finalCleaned.width * finalCleaned.height
+                    let blackPixels = finalCleaned.countBlackPixels()
+                    let inkDensity = totalPixels > 0 ? Double(blackPixels) / Double(totalPixels) : 0.0
+
+                    if inkDensity < configuration.blankPageInkDensityThreshold {
+                        var isBlankConfirmed = false
+                        if let ocrEngine {
+                            let checkBitmap: BinaryBitmap
+                            if configuration.processingDPI >= configuration.outputDPI * 2 {
+                                checkBitmap = accelerator.downsampleBinaryTo300DPI(finalCleaned)
+                            } else {
+                                checkBitmap = finalCleaned
+                            }
+                            do {
+                                let ocrObservations = try await ocrEngine.recognizeText(
+                                    in: checkBitmap,
+                                    dpi: configuration.outputDPI,
+                                    languages: configuration.ocrLanguages
+                                )
+                                if ocrObservations.isEmpty {
+                                    isBlankConfirmed = true
+                                }
+                            } catch {
+                                if detection.contentBox == nil || detection.retainedClusters.isEmpty {
+                                    isBlankConfirmed = true
+                                }
+                            }
+                        } else {
+                            if detection.contentBox == nil || detection.retainedClusters.isEmpty {
+                                isBlankConfirmed = true
+                            }
+                        }
+
+                        if isBlankConfirmed {
+                            prunedPages.append(
+                                PrunedPageRecord(
+                                    sourcePageIndex: srcIdx,
+                                    splitSide: slice.side,
+                                    inkDensity: inkDensity,
+                                    reason: "Blank sub-page slice (ink density \(String(format: "%.4f", inkDensity)) < \(String(format: "%.4f", configuration.blankPageInkDensityThreshold)), 0 OCR words)"
+                                )
+                            )
+                            continue
+                        }
+                    }
                 }
 
                 pass1Pages.append(
@@ -561,7 +670,8 @@ public struct BookPipelineCoordinator: Sendable {
             versoCanonicalFrame: bookLayout.versoCanonicalFrame,
             rectoCanonicalFrame: bookLayout.rectoCanonicalFrame,
             sourcePageSplits: sourceSplits,
-            pages: records
+            pages: records,
+            prunedPages: prunedPages
         )
 
         return PipelineOutput(
