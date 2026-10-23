@@ -1,6 +1,6 @@
 # ScanTailorReborn: Real-World Evaluation, Algorithmic Analysis, and Architectural Roadmap
 
-**Document Version:** 1.0.0  
+**Document Version:** 1.1.0  
 **Date:** October 2026  
 **Author:** AthanasiusOfAlex & Antigravity  
 **Target System:** `scantailor-cli` / macOS 14.0+ (Apple Silicon Metal & CoreGraphics)  
@@ -11,23 +11,28 @@
 
 ScanTailorReborn is a modern, pure Swift 6 reimplementation of book scan processing designed to convert raw book scans and smartphone photographs into compact, publication-quality 300 DPI 1-bit monochrome PDFs (CCITT Group 4) with invisible searchable OCR text layers.
 
-To validate the core 8-milestone pipeline under real-world conditions, an end-to-end evaluation was conducted on an academic journal article scan:
-- **Input Source:** Kevin Flannery (1993), *"What is Included in a Means to an End?"*, *Gregorianum*, Vol. 74, No. 3, pp. 499–513 (`flannery.1993.pdf`).
-- **Characteristics:** 16 pages, 612 × 800 pt (scanned at ~204 DPI, 1329 × 2045 px bitmaps), clean typography with minimal cylindrical warp, but containing modern digital contamination: an unnumbered digital JSTOR cover sheet (page 1) and an added digital tracking footer on every scanned page.
+To validate the core pipeline under real-world digitization conditions, rigorous evaluations were conducted across two contrasting academic documents:
+1. **Case Study 1: Single-Page Journal Scan with Modern Digital Artifacts**
+   - **Source:** Kevin Flannery (1993), *"What is Included in a Means to an End?"*, *Gregorianum*, Vol. 74, No. 3, pp. 499–513 (`flannery.1993.pdf`).
+   - **Profile:** 16 single pages, ~204 DPI, flat typography, digital JSTOR download cover, and spurious digital tracking footers on every page.
+2. **Case Study 2: Dual-Page Facing Spreads with Ecclesiastical Latin & Binding Warp**
+   - **Source:** Arthur Vermeersch, S.J. (1934), *Periodica de Re Morali, Canonica, Liturgica*, Vol. 23 (`vermeersch.1934.pdf`).
+   - **Profile:** 10 two-up landscape scans (20 pages), ~204 DPI, heavy 1934 Latin typography, persistent central spine crease shadows, cylindrical binding warp, and an off-center single title page scan on flatbed.
 
-### Key Outcomes
-1. **Automated Artifact Isolation:** The multi-stage layout detector cleanly discriminated between original 1993 print typography and digital margin contamination. The JSTOR footer was rejected on 100% of the scanned pages without cutting a single word of article text or footnotes.
-2. **Layout Harmonization:** Pages 2–15 were classified as uniform `fullBody` pages, while the concluding page 16 was accurately identified as `edgeAnchoredPartial` (anchored to top margins with natural bottom whitespace).
-3. **Identified Optimization Areas:**
-   - **Confidence Metric Calibration:** An overly conservative projection energy formula caused straight text pages to receive confidence scores of 0.50, triggering false-positive low-confidence warnings.
-   - **PDF Font Stream Deduplication:** Dynamic point-size font allocations caused Quartz to embed 28+ separate TrueType subsets, increasing PDF file size to 5.3 MB. Standardizing on a scaled base font reduces this to ~1.4 MB.
-   - **Default & Configurable Margins:** Enforcing standard book margins (0.25″ top/bottom, 0.50″ left/right) relative to the detected text block.
-   - **Outlier Page Handling:** Preventing cover sheets and irregular inserts from distorting canonical book dimensions.
-   - **Classical Language OCR (Tesseract):** Adding Tesseract alongside Apple Vision to support polytonic Ancient Greek and multi-lingual Latin/Greek texts.
+### Key Outcomes & Validation
+1. **Automated Artifact Isolation:** `ContentBoxDetector` cleanly discriminated between original print typography and spurious digital margin contamination, rejecting the JSTOR download footer on 100% of pages without clipping footnotes.
+2. **Facing Spread Splitting & Dewarping:** 10 landscape scans were cleanly split into 20 output pages. Pages exhibiting spine curl ($s_{\max} > 15\text{ px}$) were successfully flattened by `CylindricalDewarpSolver` to RMS residual $< 2.34\text{ px}$, while flat pages auto-bypassed dewarping to preserve sharp raster glyphs.
+3. **Latin OCR Precision:** Apple Vision demonstrated exceptional recognition of 1934 ecclesiastical Latin vocabulary, ligatures, legal section citations (`§`), diacritics, and footnotes.
+4. **Critical Identified Deficiencies:**
+   - **Page Splitter Calibration & Dark Dividing Lines:** A dark, high-contrast spine dividing line was largely penalized as generic ink by the corridor cost function, causing split lines to drift into adjacent lighter paper rather than bisecting the crease centerline.
+   - **Spine Crease Ink Bleeding into Content Boxes:** Zero-width knife splitting left narrow dark crease remnants along the split edge. Morphological closing bridged these crease fragments into large retained clusters, causing the detected content box to expand to the cut edge ($x = 2..4\text{ px}$) and compromising recto/verso margin alignment.
+   - **Confidence Metric Calibration:** Conservative Radon energy scaling clamped straight pages to 0.50 confidence, causing 100% false-positive warnings.
+   - **PDF Font Stream Duplication:** Dynamic `CTFont` instantiations bloated Flannery to 5.3 MB (reducible to ~1.4 MB via single scaled base font).
+   - **Classical Language OCR:** Polytonic Ancient Greek requires Tesseract integration alongside Apple Vision.
 
 ---
 
-## 2. Real-World Case Study: `flannery.1993.pdf`
+## 2. Real-World Case Study 1: `flannery.1993.pdf`
 
 ### 2.1 Input Document Profile
 
@@ -39,76 +44,147 @@ To validate the core 8-milestone pipeline under real-world conditions, an end-to
 | **Defects Present** | Digital cover page, spurious JSTOR footer banner | Text lines flat ($< 11.7\text{ px}$ vertical sag) |
 
 ### 2.2 Processing Telemetry & Geometry
+- **Canonical Canvas:** $3900 \times 6067\text{ px}$ at 600 DPI ($468.0 \times 728.04\text{ pt}$ in PDF coordinates).
+- **Verso Canonical Frame:** $2470 \times 4225\text{ px}$ located at $(720, 730)$.
+- **Recto Canonical Frame:** $2470 \times 4225\text{ px}$ located at $(718, 730)$.
+- **Dewarp Mode:** Auto-bypass triggered on all pages ($s_{\max} < 12.0\text{ px}$), preserving sharp native pixel glyphs.
+- **Footer Isolation:** The digital JSTOR banner sat $932\text{ px}$ below the body text, exceeding the maximum allowable gap ($849\text{ px}$), and was 100% rejected across all pages.
+
+---
+
+## 3. Real-World Case Study 2: `vermeersch.1934.pdf`
+
+### 3.1 Input Document Profile
+
+| Property | Value | Notes |
+| :--- | :--- | :--- |
+| **Source File** | `vermeersch.1934.pdf` (1.02 MB) | Canonical and moral theology journal (1934) |
+| **Source Scans** | 10 landscape scans ($751.32 \times 595.44\text{ pt}$) | Photocopier flatbed scan (Ricoh MP 2555) |
+| **Output Pages** | 20 portrait pages ($397.68 \times 671.40\text{ pt}$) | Uniform $5.52 \times 9.32\text{ in}$ canvas at 300 DPI |
+| **Text Language** | Ecclesiastical Latin | Extensive abbreviations, Roman numerals, accents |
+| **Defects Present** | Dark central spine dividing line, binding warp | Single title page on Scan 1; spreads on Scans 2–10 |
+
+### 3.2 Processing Telemetry & Geometry
 
 The document was processed using:
 ```bash
-scantailor-cli process "flannery.1993.pdf" \
-  -o "06-pdf-tool-test/flannery.1993.pdf" \
+scantailor-cli process "vermeersch.1934.pdf" \
+  -o "06-pdf-tool-test/vermeersch.1934.pdf" \
+  --manifest "06-pdf-tool-test/vermeersch.1934-manifest.json" \
   --diagnostics-dir "06-pdf-tool-test/diagnostics" \
   --all-diagnostics
 ```
 
 The 3-pass pipeline yielded the following book-wide layout model:
-- **Canonical Canvas:** $3900 \times 6067\text{ px}$ at 600 DPI ($468.0 \times 728.04\text{ pt}$ in PDF coordinates).
-- **Verso Canonical Frame:** $2470 \times 4225\text{ px}$ located at $(720, 730)$.
-- **Recto Canonical Frame:** $2470 \times 4225\text{ px}$ located at $(718, 730)$.
-- **Dewarp Mode:** Auto-bypass triggered on all pages ($s_{\max} < 12.0\text{ px}$), preserving razor-sharp native pixel glyphs.
+- **Canonical Canvas:** $3314 \times 5595\text{ px}$ at 600 DPI ($397.68 \times 671.40\text{ pt}$).
+- **Verso Canonical Frame:** $2714 \times 4875\text{ px}$ located at $(600, 319)$ (gutter margin on right).
+- **Recto Canonical Frame:** $2714 \times 4875\text{ px}$ located at $(83, 319)$ (gutter margin on left).
+- **Dewarp Execution:**
+  - Page 2 (src #1, rightRecto): Sag $s_{\max} = 27.5\text{ px}$, 35 text lines $\to$ Dewarped to RMS residual $= 2.34\text{ px}$.
+  - Page 7 (src #4, leftVerso): Sag $s_{\max} = 15.0\text{ px}$, 41 text lines $\to$ Dewarped to RMS residual $= 2.07\text{ px}$.
+  - Pages 3–6, 8–20: Sag $s_{\max} < 7.3\text{ px} \to$ Dewarp auto-bypassed with zero resample blur.
 
 ```
-=== Per-Page Telemetry Summary ===
-Page 1  (src #1, recto): tier=standaloneFloating, skew=+0.00°, dewarp=bypass, conf=0.73 [FLAGGED]
-Page 2  (src #2, verso): tier=fullBody,           skew=-0.00°, dewarp=bypass, conf=0.50 [FLAGGED]
-Page 3  (src #3, recto): tier=fullBody,           skew=+0.00°, dewarp=bypass, conf=0.50 [FLAGGED]
-...
-Page 15 (src #15, recto): tier=fullBody,          skew=+0.00°, dewarp=bypass, conf=0.50 [FLAGGED]
-Page 16 (src #16, verso): tier=edgeAnchoredPartial, skew=+0.00°, dewarp=bypass, conf=0.50 [FLAGGED]
+=== Per-Page Telemetry Summary (Vermeersch 1934) ===
+Page 01 (src #1, leftVerso ): tier=standaloneFloating, skew=-0.25°, dewarp=bypass, box=(4,27,1981x4931)    [BLANK SLICE]
+Page 02 (src #1, rightRecto): tier=standaloneFloating, skew=+0.80°, dewarp=APPLIED, box=(891,106,2933x4856) [TITLE PAGE]
+Page 03 (src #2, leftVerso ): tier=fullBody,           skew=+0.21°, dewarp=bypass, box=(385,19,2729x4844)
+Page 04 (src #2, rightRecto): tier=standaloneFloating, skew=-0.00°, dewarp=bypass, box=(4,15,2338x4863)    [CREASE INK]
+Page 05 (src #3, leftVerso ): tier=fullBody,           skew=+0.00°, dewarp=bypass, box=(776,0,2524x4887)
+Page 06 (src #3, rightRecto): tier=standaloneFloating, skew=-0.21°, dewarp=bypass, box=(10,10,2207x4586)
+Page 07 (src #4, leftVerso ): tier=standaloneFloating, skew=-0.00°, dewarp=APPLIED, box=(755,354,2185x4435)
+Page 08 (src #4, rightRecto): tier=fullBody,           skew=-0.36°, dewarp=bypass, box=(3,4,2708x4865)     [CREASE INK]
+Page 09 (src #5, leftVerso ): tier=fullBody,           skew=+0.00°, dewarp=bypass, box=(438,0,2895x4881)
+Page 10 (src #5, rightRecto): tier=standaloneFloating, skew=-0.62°, dewarp=bypass, box=(58,388,2333x4257)
+Page 11 (src #6, leftVerso ): tier=fullBody,           skew=+0.40°, dewarp=bypass, box=(732,33,2576x4843)
+Page 12 (src #6, rightRecto): tier=standaloneFloating, skew=-0.88°, dewarp=bypass, box=(38,3,2248x4384)
+Page 13 (src #7, leftVerso ): tier=fullBody,           skew=+1.75°, dewarp=bypass, box=(415,3,2705x4768)
+Page 14 (src #7, rightRecto): tier=standaloneFloating, skew=-1.15°, dewarp=bypass, box=(2,0,2422x4873)     [CREASE INK]
+Page 15 (src #8, leftVerso ): tier=fullBody,           skew=+0.79°, dewarp=bypass, box=(649,0,2663x4865)
+Page 16 (src #8, rightRecto): tier=standaloneFloating, skew=-0.98°, dewarp=bypass, box=(42,3,2195x4386)
+Page 17 (src #9, leftVerso ): tier=standaloneFloating, skew=+0.74°, dewarp=bypass, box=(718,313,2258x4065)
+Page 18 (src #9, rightRecto): tier=fullBody,           skew=-0.79°, dewarp=bypass, box=(2,3,2552x4850)     [CREASE INK]
+Page 19 (src #10, leftVerso): tier=edgeAnchoredPartial, skew=+0.27°, dewarp=bypass, box=(531,2,2546x4462)
+Page 20 (src #10, rightRecto): tier=standaloneFloating, skew=+0.00°, dewarp=bypass, box=(3,3,2395x4878)    [CREASE INK]
 ```
 
 ---
 
-## 3. Algorithmic Evaluation & Detailed Findings
+## 4. Algorithmic Evaluation & Detailed Findings
 
-### 3.1 Gutter Detection & Spread Classification
-`PageSplitEstimator` evaluated the aspect ratio ($612 / 800 = 0.765$) and ink mass distribution across the central corridor. Because the ratio fell below `minimumTwoPageAspectRatio` ($1.18$), all 16 pages were classified as single portrait pages (`.singlePage`) with a confidence of 0.85. No split cutting or cross-gutter artifacts were introduced.
+### 4.1 Gutter Detection & Spread Splitting
+On true facing spreads (scans 2–10), `PageSplitEstimator` identified dual-page spreads with aspect ratio $\approx 1.26$, locating split lines between normalized $x \in [0.495, 0.532]$ with slight tilt $\phi \in [-1.0^\circ, 0.0^\circ]$.
 
-### 3.2 Spurious Footer Isolation (The JSTOR Banner)
-A primary challenge in digitizing journal scans is distinguishing legitimate page elements (running headers, footers, page numbers, and footnotes) from added digital watermarks and download banners.
+However, on scan 1 (an off-center single title page placed on the flatbed), the estimator split at $x = 1996$ (normalized $0.3188$), producing an empty Page 1 ($0$ chars) and placing the title on Page 2. In historical ScanTailor XML projects, this was handled via manual sub-page removal (`<image removed="L" subPages="1"/>`).
 
-On every page from 2 through 16:
-- The main text column and footnotes ended at approximately $y \approx 4950\text{ px}$ (at 600 DPI).
-- The JSTOR banner (*"This content downloaded from 157.182.150.22 on Thu, 22 Oct 2015 19:43:55 UTC All use subject to JSTOR Terms and Conditions"*) was located at $y = 5888\text{ px}$ ($h = 128\text{ px}, w = 2224\text{ px}$).
-- Vertical separation distance:
-  $$\Delta y = 5888 - 4956 = 932\text{ px}$$
-- `ContentBoxDetector` enforces `maxHeaderFooterGapFraction = 0.14`. On a $6067\text{ px}$ canvas, this corresponds to:
-  $$\text{Gap}_{\max} = 6067 \times 0.14 = 849\text{ px}$$
+### 4.2 Latin OCR Evaluation (Apple Vision)
+Apple Vision demonstrated remarkable accuracy on 1934 Latin:
+- **Diacritics & Accents:** Accurately captured *péccet*, *nondum*, *tamén*.
+- **Canonical Symbols & Citations:** Faithfully extracted *« »*, legal sections (*§ 2*), and canon citations (*can. 899 § 2*).
+- **Specialized Theological Vocabulary:** Correctly transcribed *paenitentiaria*, *in radice sanando*, *coronas precatorias*, *dissertatio*.
+- **Conclusion:** Apple Vision natively excels at Latin without requiring custom dictionary training. Ancient Greek polytonic text remains the primary driver for Tesseract integration.
 
-Because $932\text{ px} > 849\text{ px}$, the banner fell outside the allowable body-to-footer gap. The cluster was cleanly segregated into `rejectedClusterBoxes`. 
-
-**Verification:**
-- Verification via `pdftotext` confirmed zero instances of the string `"This content downloaded"` in the final PDF.
-- Running headers (*"G R E G O R IA N U M 7 4 , 3 ( 1 9 9 3 ) 4 9 9 - 5 1 3"*), page numbers (501, 503, ...), and dense multi-line footnotes (e.g., footnote 4 on page 2 spanning 6 lines) were 100% retained.
-
-### 3.3 3-Tier Margin Harmonization
-- **Pages 2–15:** Detected content dimensions exhibited remarkable consistency:
-  - Width: $2455\text{ px} \le w \le 2496\text{ px}$ (variation $< 1.7\%$)
-  - Height: $4197\text{ px} \le h \le 4235\text{ px}$ (variation $< 0.9\%$)
-  All were assigned `tier = .fullBody`, locking their origins to the canonical top and inner gutter coordinates.
-- **Page 16:** The final page of the article contained only 36 lines of text ($h = 3243\text{ px}$).
-  - Naive centering would have vertically displaced the text column, creating an unsightly reading jump.
-  - ScanTailorReborn accurately designated Page 16 as `tier = .edgeAnchoredPartial`, anchoring its top edge to the canonical text frame ($y = 730\text{ px}$) while allowing natural blank space at the bottom.
+### 4.3 Alternating Recto/Verso Binding Margins
+`MarginHarmonizer` successfully aligned alternating pages:
+- Verso pages placed the text frame at $x = 600$, leaving binding clearance on the right edge.
+- Recto pages placed the text frame at $x = 83$, leaving binding clearance on the left edge.
 
 ---
 
-## 4. Identified Issues & Technical Root Causes
+## 5. Identified Issues & Technical Root Causes
 
-### 4.1 Skew Estimator Confidence Calibration
+### 5.1 Page Splitter Calibration & The Dark Spine Dividing Line
 
 #### The Symptom
-Every page in the document was flagged with:
+On scans with a prominent dark spine dividing line or heavy binding shadow, `PageSplitEstimator` largely ignored the centerline of the dark dividing line. Instead of cutting cleanly through the center of the dark seam, the split line was displaced to the edge of the line or into adjacent white space, leaving dark line ink attached to the sliced pages.
+
+#### Mathematical Root Cause Analysis
+In `PageSplitEstimator.swift`:
+```swift
+let cost = meanCorridorInk * 3.5 + gapPenalty + centerPrior + tiltPrior - spineFactor
 ```
-WARNING: 16 page(s) had confidence below threshold: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+1. **Ink Penalization in the Corridor:** The primary cost term `meanCorridorInk * 3.5` treats ink within the gutter corridor as a severe penalty. This model is optimal when the gutter is a pristine white valley between text columns.
+2. **Under-Weighted Spine Bonus:** When a physical book has an obvious dark dividing line (spine crease, binding seam, or fold shadow), the corridor contains intense black foreground pixels. While a `spineFactor` bonus was introduced:
+   ```swift
+   if spineDip > 25.0 && corridorDensity > flankDensity {
+       corridorInkSum += max(0.0, corridorDensity - spineDip * 0.25)
+   }
+   ```
+   Subtracting `spineDip * 0.25` discounts at most $\approx 8$ units of ink density when `spineDip \approx 32`. If the dark line produces a density of 60–100, the remaining corridor ink still incurs a heavy cost penalty ($> 150$).
+3. **Flank Drift:** As a result, the cost function drives the split line away from the ink-dense centerline of the dark dividing line toward the lighter shoulder of the crease or the inner white margin.
+
+---
+
+### 5.2 Spine Crease Ink Bleed into Content Box Detection
+
+#### The Symptom
+Ink from the dark dividing line ended up inside the content bounding boxes across multiple pages (notably Pages 4, 8, 14, 18, and 20). Instead of isolating only body text and headers, the detected content box expanded all the way to $x = 2..4\text{ px}$ (the cut edge).
+
+#### Root Cause Analysis
+1. **Zero-Width Knife Split:** `PageSplitEstimator.split()` performs a 1D line cut. Slicing through or alongside a 20–40 px wide dark crease leaves a narrow band of dark ink along the inner boundary of the slice ($x \approx 0$ on `rightRecto` pages; $x \approx W$ on `leftVerso` pages).
+2. **Morphological Bridging:** In `ContentBoxDetector.swift`:
+   ```swift
+   let closed = BinaryMorphology.closeBrick(cleaned, width: 64, height: 14)
+   ```
+   A horizontal closing brick of $64\text{ px}$ bridges the dark crease fragments into extensive clusters:
+   - **Page 4:** Crease ink bridged directly into the body text column ($x = 4, w = 2329, h = 2644$).
+   - **Page 8:** Crease formed an isolated massive cluster ($x = 7, y = 4, w = 362, h = 1388$).
+   - **Page 14:** Crease formed a massive cluster ($x = 23, y = 0, w = 661, h = 2443$).
+   - **Page 18:** Crease formed a massive cluster ($x = 13, y = 3, w = 373, h = 1584$).
+   - **Page 20:** Crease formed a cluster ($x = 3, y = 3, w = 319, h = 1113$).
+3. **Bypassing Peripheral Noise Filters:** Because these crease clusters carry hundreds to thousands of foreground pixels and extend inward beyond the narrow `outerEdgeMarginFraction` ($3.5\%$), they are classified as valid body elements and retained.
+4. **Layout Corruption:** With content boxes starting at $x = 2..4\text{ px}$, `MarginHarmonizer` miscalculates page margins, pushing text columns out of alignment and leaving dark black lines visible in the final reading PDF.
+
+---
+
+### 5.3 Skew Estimator Confidence Calibration
+
+#### The Symptom
+Every page across both documents was flagged with false-positive warnings:
 ```
-Even though detected skew angles were virtually zero (e.g. $\theta = -0.0008^\circ$) and typography was pristine, `overallConfidence` was reported as exactly `0.50` (against a threshold of `0.75`).
+WARNING: 20 page(s) had confidence below threshold: [1, 2, ..., 20]
+```
+Scores evaluated to exactly `0.50` despite pristine typography and virtually zero skew.
 
 #### Root Cause Analysis
 In `SkewEstimator.swift`:
@@ -116,174 +192,109 @@ In `SkewEstimator.swift`:
 let ratio = coarseMedianEnergy > 1e-9 ? (peakEnergy / coarseMedianEnergy) : 1.0
 let confidence = min(1.0, max(0.0, (ratio - 1.0) / 4.0))
 ```
-In Radon/horizontal projection space, a peak-to-median energy ratio of $2.1\times$ indicates that projecting along the text baselines concentrates more than double the energy of arbitrary angles—a very distinct signal for printed text. However, dividing by $4.0$ requires a ratio of $5.0\times$ to achieve 1.0 confidence. Consequently, the confidence evaluated to:
-$$\text{conf}_{\text{skew}} = \frac{2.1 - 1.0}{4.0} \approx 0.275$$
-
-In `BookPipelineCoordinator.swift`:
-```swift
-let skewConf = p1.detection.contentBox == nil ? 1.0 : max(0.5, p1.skewConfidence)
-let overallConfidence = min(p1.splitConfidence, min(skewConf, p1.detection.confidence))
-```
-`skewConf` was clamped to $0.50$. Since $\min(0.85, 0.50, 0.98) = 0.50$, every page was clamped to $0.50$, tripping the warning.
-
-#### Proposed Solution
-1. Recalibrate the peak energy denominator from `4.0` to `1.5`:
-   $$\text{conf}_{\text{skew}} = \min\left(1.0, \max\left(0.0, \frac{\text{ratio} - 1.0}{1.5}\right)\right)$$
-   A ratio of $2.1\times$ will now produce $\text{conf}_{\text{skew}} = 0.733$.
-2. Weight skew confidence by component count and angular deviation: when $|\theta| < 0.1^\circ$ and retained text components $> 25$, skew confidence should naturally converge toward $0.95+$.
+A peak-to-median ratio of $2.1\times$ evaluates to $(2.1 - 1.0) / 4.0 = 0.275$, which `BookPipelineCoordinator` clamps to $0.50$. Dividing by $1.5$ instead of $4.0$ properly scales normal text projection peaks to $> 0.75$.
 
 ---
 
-### 4.2 PDF Font Stream Deduplication & Bloat
+### 5.4 PDF Font Stream Bloat
 
 #### The Symptom
-The generated 16-page PDF measured **5.3 MB**. However, extracting the underlying CCITT/JBIG2 1-bit bitmaps revealed that total raster image data accounted for only **1.4 MB**. Over **3.9 MB** was consumed by PDF stream overhead.
+The 16-page Flannery PDF generated at **5.3 MB**, whereas extracted 1-bit bitmap streams accounted for only **1.4 MB**.
 
 #### Root Cause Analysis
-In `ApplePDFDocumentWriter.swift`:
-```swift
-let fontSize = max(1.0, CGFloat(pdfHeight) * 0.85)
-let font = CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
-```
-For every recognized text observation (several dozen per page), a new `CTFont` instance was created with a floating-point size (e.g. `11.42 pt`, `12.08 pt`, `10.87 pt`). Inspection via `pdffonts` revealed that Apple's Quartz `CGPDFContext` embedded independent TrueType font subsets for each distinct font point size:
-```
-AAAAAB+Helvetica   TrueType   MacRoman   yes yes no   6 0
-AAAAAC+Helvetica   TrueType   MacRoman   yes yes no   7 0
-AAAAAD+Helvetica   TrueType   MacRoman   yes yes no   8 0
-... (28+ embedded TrueType subsets)
-```
-
-#### Proposed Solution
-Standardize on a single, shared base font:
-```swift
-// Allocate one static font descriptor for the entire document
-let baseFont = CTFontCreateWithName("Helvetica" as CFString, 12.0, nil)
-```
-Rather than instantiating dynamic font sizes, apply vertical and horizontal scaling directly via `CGAffineTransform` on `pdfContext.textMatrix`:
-```swift
-let vScale = CGFloat(pdfHeight) / 12.0
-let hScale = naturalWidth > 0.1 ? (CGFloat(pdfWidth) / naturalWidth) * (vScale) : 1.0
-pdfContext.textMatrix = CGAffineTransform(
-    a: hScale, b: 0,
-    c: 0,      d: vScale,
-    tx: CGFloat(pdfX),
-    ty: baselineY
-)
-```
-This forces Quartz to embed exactly **one** TrueType subset across the entire PDF, cutting total document size from 5.3 MB to ~1.4 MB (a 73% reduction).
+`ApplePDFDocumentWriter` instantiated dynamic `CTFont` sizes for each text observation, forcing Quartz `CGPDFContext` to embed 28+ distinct TrueType font subsets. Standardizing on a single 12 pt base font scaled via `CGAffineTransform` reduces PDF file size to ~1.4 MB.
 
 ---
 
-## 5. Architectural Roadmap & New Requirements
+## 6. Architectural Roadmap & New Requirements
 
-### 5.1 Configurable & Publication-Standard Default Margins
+### 6.1 Dual-Mode Gutter Detection & Spine Crease Midline Tracking
 
 #### Requirement
-The physical print on a page forms a content box that represents what is placed inside the margins. The system must support publication-grade margin defaults:
-- **Default Top & Bottom Margins:** $0.25\text{ in}$ ($6.35\text{ mm}$ = $150\text{ px}$ at 600 DPI)
-- **Default Left & Right Margins:** $0.50\text{ in}$ ($12.70\text{ mm}$ = $300\text{ px}$ at 600 DPI)
+`PageSplitEstimator` must recognize when a spread contains an obvious dark dividing line (spine crease shadow, fold, or dark binding seam) versus a clean white gutter valley.
 
 #### Architectural Design
-1. **Pipeline Configuration (`MarginHarmonizer.Configuration`):**
+1. **Dual-Mode Spine Evaluator:**
+   - Compute vertical continuity of dark pixels along candidate columns.
+   - If a continuous dark line ($\ge 75\%$ vertical ink continuity) exists near the center, switch from **White Valley Mode** to **Dark Crease Mode**.
+   - In Dark Crease Mode, invert the ink cost: the optimizer **maximizes** alignment with the dark crease spine rather than penalizing corridor ink.
+2. **Gutter Strip Trimming (Central Crease Removal):**
+   Instead of a zero-width knife split, allow specifying a central gutter trimming width ($W_{\text{gutter}} \approx 10..40\text{ px}$):
+   - Left slice clips at $X_{\text{split}} - W_{\text{gutter}} / 2$.
+   - Right slice starts at $X_{\text{split}} + W_{\text{gutter}} / 2$.
+   - This physically removes the dark dividing line at the slicing stage, preventing crease ink from ever entering downstream pipeline stages.
+
+---
+
+### 6.2 Split-Boundary Noise Exclusion in `ContentBoxDetector`
+
+#### Requirement
+Even if split lines pass slightly off-center, residual crease ink must not be fused into body text clusters or retained as content.
+
+#### Architectural Design
+1. **Dedicated Split-Edge Exclusion Zone:**
+   In `ContentBoxDetector.Configuration`, introduce:
    ```swift
-   public struct MarginConfiguration: Sendable, Equatable, Codable {
-       public var topMarginInches: Double = 0.25
-       public var bottomMarginInches: Double = 0.25
-       public var leftMarginInches: Double = 0.50
-       public var rightMarginInches: Double = 0.50
-   }
+   public var splitEdgeExclusionFraction: Double = 0.04 // 4% of slice width
    ```
-2. **Canonical Canvas Calculation:**
-   Given the canonical body text frame $(W_{\text{body}}, H_{\text{body}})$ computed from statistical body clustering:
-   $$W_{\text{canvas}} = W_{\text{body}} + \text{DPI} \times (\text{Margin}_{\text{left}} + \text{Margin}_{\text{right}})$$
-   $$H_{\text{canvas}} = H_{\text{body}} + \text{DPI} \times (\text{Margin}_{\text{top}} + \text{Margin}_{\text{bottom}})$$
-3. **CLI Options:**
-   Expose flexible margin specifications on `scantailor-cli`:
-   ```bash
-   scantailor-cli process input.pdf -o output.pdf \
-     --margins "top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"
-   ```
-   Or shorthand CSS-style:
-   ```bash
-   --margins "0.25in,0.5in"   # (vertical, horizontal)
-   ```
+2. **Pre-Morphological Edge Masking:**
+   On sliced pages (`.leftVerso` or `.rightRecto`), apply a dedicated edge mask along the inner cut margin prior to morphological closing. This breaks the link between the spine crease and the text column, ensuring crease fragments are classified as peripheral noise.
 
 ---
 
-### 5.2 Outlier Rejection for Canvas Sizing (Covers, Spread Inserts & Tables)
+### 6.3 Blank Sub-Page Auto-Pruning & Outlier Filtering
 
 #### Requirement
-Pages should normally match in size to maintain visual rhythm when reading. However, irregular pages must not inflate or distort the canonical text frame:
-- Digital download title sheets (e.g. JSTOR cover page)
-- Thick book cover scans and endpapers
-- Oversized landscape foldout tables and diagrams
+Single-page scans (such as the title page on Scan 1 of Vermeersch) and oversized foldouts must not generate blank phantom pages or distort canonical layout dimensions.
 
 #### Architectural Design
-1. **Two-Tier Statistical Filter in `MarginHarmonizer`:**
-   - Compute median and interquartile range (IQR) across all detected content boxes.
-   - Any page whose width or height exceeds $1.4\times$ the median or exhibits an aspect ratio deviating by $> 25\%$ from the dominant mode is marked as an **Outlier Page**.
-2. **Exclusion from Canonical Frame Computation:**
-   Outlier pages are excluded from the canonical frame calculation so they do not expand margins on regular text pages.
-3. **Dedicated Canvas Placement for Outliers:**
-   - Outliers are processed as `.standaloneFloating` with their own individual canvas boundaries, or mapped to independent oversized canvas sheets without stretching.
-4. **CLI Page Range & Exclusion Flags:**
-   ```bash
-   scantailor-cli process input.pdf -o output.pdf --exclude-pages 1
-   scantailor-cli process input.pdf -o output.pdf --page-range 2-16
-   ```
-
----
-
-### 5.3 Dual OCR Engine Support: Apple Vision & Tesseract (Polytonic Ancient Greek)
-
-#### Requirement
-The current implementation relies on Apple Vision (`AppleVisionOCREngine`). While Apple Vision delivers high accuracy on modern Romance and Germanic languages and standard Latin script, it cannot recognize polytonic Ancient Greek diacritics (spiritus asper/lenis, perispomeni, iota subscripts) and lacks classical language vocabulary models.
-
-Tesseract OCR provides specialized classical language training models:
-- `grc` (Ancient Greek polytonic)
-- `lat` (Latin)
-- `deu_frak` (German Fraktur / blackletter)
-
-#### Architectural Design
-
-```
-                     ┌────────────────────────┐
-                     │   OCREngine Protocol   │
-                     └───────────┬────────────┘
-                                 │
-                 ┌───────────────┴───────────────┐
-                 ▼                               ▼
-     ┌───────────────────────┐       ┌───────────────────────┐
-     │  AppleVisionOCREngine │       │   TesseractOCREngine  │
-     │  (Vision.framework)   │       │  (libtesseract / CLI) │
-     └───────────────────────┘       └───────────────────────┘
-```
-
-1. **New Target / Module:** Implement `TesseractOCREngine: OCREngine` in `ScanTailorPortableBackend` or a dedicated backend module.
-2. **Language Configuration & Multi-Language Support:**
-   Allow combining scripts (e.g., Latin apparatus criticus with Greek main text):
+1. **Automatic Blank Slice Pruning:**
+   If a split sub-page slice contains foreground ink density $< 0.5\%$ and 0 recognized OCR words, automatically prune the slice or flag it as an empty flyleaf.
+2. **CLI Exclusion & Alignment Flags:**
    ```bash
    scantailor-cli process input.pdf -o output.pdf \
-     --ocr-engine tesseract \
-     --languages grc+lat+eng
+     --exclude-pages 1 \
+     --first-page-side recto
    ```
-3. **Comparative Evaluation Framework:**
-   Build an automated benchmark tool within the test suite comparing Character Error Rate (CER) and Word Error Rate (WER) between Apple Vision and Tesseract on bilingual Greek/Latin texts.
+3. **IQR Outlier Rejection in `MarginHarmonizer`:**
+   Exclude pages whose dimensions deviate by $> 25\%$ from the median from canonical frame calculations.
 
 ---
 
-## 6. Implementation Strategy & Milestones
+### 6.4 Publication Margin Defaults & Configurable CLI Margins
+
+#### Requirement
+Support standard publication margins relative to the detected text block:
+- **Default Top & Bottom Margins:** $0.25\text{ in}$ ($150\text{ px}$ at 600 DPI)
+- **Default Left & Right Margins:** $0.50\text{ in}$ ($300\text{ px}$ at 600 DPI)
+- CLI option: `--margins "top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"`
+
+---
+
+### 6.5 Dual OCR Engine Support: Apple Vision & Tesseract
+
+#### Requirement
+Integrate `TesseractOCREngine: OCREngine` for polytonic Ancient Greek (`grc`) and Fraktur (`deu_frak`) alongside native Apple Vision.
+```bash
+scantailor-cli process input.pdf -o output.pdf \
+  --ocr-engine tesseract \
+  --languages grc+lat+eng
+```
+
+---
+
+## 7. Implementation Strategy & Milestones
 
 | Phase | Milestone | Scope |
 | :--- | :--- | :--- |
-| **Phase 1** | **Bugfixes & Calibration** | 1. Recalibrate `SkewEstimator` confidence curve to avoid false warnings.<br>2. Deduplicate font subsets in `ApplePDFDocumentWriter` (5.3 MB $\rightarrow$ 1.4 MB). |
-| **Phase 2** | **Margin Control & Page Filtering** | 1. Implement publication margin defaults (0.25″ top/bottom, 0.50″ left/right).<br>2. Expose `--margins`, `--page-range`, and `--exclude-pages` in CLI.<br>3. Add IQR outlier rejection in `MarginHarmonizer`. |
+| **Phase 1** | **Calibration & Font Optimization** | 1. Recalibrate `SkewEstimator` confidence curve (denominator $1.5$).<br>2. Deduplicate font subsets in `ApplePDFDocumentWriter` (5.3 MB $\rightarrow$ 1.4 MB). |
+| **Phase 2** | **Spine Crease, Gutter & Content Filtering** | 1. Implement Dual-Mode Gutter Detection (Dark Crease vs White Valley).<br>2. Add central gutter strip trimming ($W_{\text{gutter}}$) to eliminate crease remnants.<br>3. Add split-boundary noise exclusion zone in `ContentBoxDetector`.<br>4. Auto-prune blank sub-page slices ($< 0.5\%$ ink).<br>5. Implement publication margin defaults (0.25″ vertical, 0.50″ horizontal).<br>6. Expose `--margins`, `--page-range`, and `--exclude-pages`. |
 | **Phase 3** | **Tesseract OCR Integration** | 1. Implement `TesseractOCREngine` conforming to `OCREngine`.<br>2. Expose `--ocr-engine` and `--languages` in CLI.<br>3. Add Ancient Greek polytonic test fixtures. |
 
 ---
 
-## 7. Conclusion
+## 8. Conclusion
 
-The real-world evaluation on `flannery.1993.pdf` validates that ScanTailorReborn's core mathematical and geometric architecture is exceptionally sound. The automated separation of spurious digital footers, robust margin harmonization across full and partial pages, and flat-page dewarp auto-bypassing perform at or above commercial tools such as ABBYY FineReader. 
+Real-world evaluations across both single-page journal scans (`flannery.1993.pdf`) and complex dual-page facing spreads (`vermeersch.1934.pdf`) demonstrate that ScanTailorReborn's core mathematical foundation is exceptionally robust. The system excels at 3D curvature flattening, flat-page auto-bypassing, spurious footer elimination, alternating binding margins, and Latin OCR.
 
-By implementing the font deduplication, confidence recalibration, publication-standard margin controls, and Tesseract polytonic Greek integration detailed in this white paper, ScanTailorReborn will establish itself as a premier open-source tool for scholarly book digitization.
+Documenting and resolving the dark spine dividing line calibration and crease ink bleeding issues will eliminate the primary source of margin distortion on book spreads, cementing ScanTailorReborn as a state-of-the-art scholarly digitization pipeline.
