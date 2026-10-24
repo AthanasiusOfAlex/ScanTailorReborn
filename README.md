@@ -310,9 +310,9 @@ Sources/
 
 ---
 
-## Documentation & Research
+## Documentation & Changelog
 
-- [**Technical White Paper**](docs/WHITE_PAPER.md): Comprehensive real-world evaluation, algorithmic case studies (*Flannery 1993*, *Vermeersch 1934*), mathematical analysis of layout/confidence metrics, and architectural implementation record covering Phases 1, 2, and 3.
+- [**Changelog & Architectural Evolution**](CHANGELOG.md): Comprehensive development history, initial benchmark case studies (*Flannery 1993*, *Vermeersch 1934*), mathematical analysis of layout/confidence metrics, and full implementation record across Phases 1, 2, and 3.
 
 ---
 
