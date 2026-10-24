@@ -247,26 +247,171 @@ graph TD
 
 ## 5. Architectural Roadmap to v1.0.0
 
+To advance **ScanTailorReborn** from its current v2.0 baseline to complete **v1.0.0 Production Release** status, the remaining work is divided into four execution phases comprising 8 major steps and 19 granular substeps. Each substep is assigned a proposed execution model (**Argon** for advanced architectural reasoning and mathematical computer vision; **Flash** for deterministic integration, CLI scaffolding, and documentation) and an effort level (**High**, **Medium**, **Low**).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    Phase 4: Physical Scale & Scale-Invariant Lighting       │
-│  - Task 4.1: Camera-wrapper PDF DPI detection & --page-size / --input-dpi   │
-│  - Task 4.2: Glyph-scale adaptive background normalization (anti-starvation)│
-│  - Task 4.3: Physical scale warning & interactive agent-prompt escalation   │
+│  - Step 4.1: Camera-Wrapper DPI Derivation & Scale Inference                │
+│  - Step 4.2: Glyph-Scale Adaptive Illumination Normalization                │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │
 ┌──────────────────────────────────────▼──────────────────────────────────────┐
 │                    Phase 5: Page Quadrangle & Desk Excision                 │
-│  - Task 5.1: Convex hull & paper quadrangle boundary extraction              │
-│  - Task 5.2: Pre-binarization table surface masking                         │
+│  - Step 5.1: Document Quadrangle Detection (`DocumentQuadDetector`)         │
+│  - Step 5.2: Pre-Binarization Desk & Shadow Masking                         │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │
 ┌──────────────────────────────────────▼──────────────────────────────────────┐
 │                Phase 6: Canonical Layout & Agentic Manifest CLI              │
-│  - Task 6.1: Top-header vertical alignment anchor for running pages          │
-│  - Task 6.2: Outlier canvas sizing (covers & foldouts vs canonical body)    │
-│  - Task 6.3: CLI `--apply-manifest` fast-path for sub-2-second agent tweaks │
+│  - Step 6.1: Running Header Top Alignment & Baseline Stabilization          │
+│  - Step 6.2: Canonical Sizing & Outlier Canvas Isolation                    │
+│  - Step 6.3: Fast-Path `--apply-manifest` CLI Architecture                  │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────▼──────────────────────────────────────┐
+│                  Phase 7: Verification & Final v1.0.0 Release               │
+│  - Step 7.1: Comprehensive Empirical Benchmark Suite                        │
+│  - Step 7.2: Release Documentation & Changelog Finalization                 │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+### Phase 4: Physical Scale & Scale-Invariant Lighting
+
+#### Step 4.1: Camera-Wrapper DPI Derivation & Scale Inference
+- **Substep 4.1.1: Automatic Font-Scale Heuristic & Median Glyph Height Analyzer**
+  - *Description*: Analyze initial OCR bounding boxes and connected-component bounding boxes across the book to measure median lowercase character height ($H_{\text{glyph}}$). Relate observed pixel height to standard published book typography ($\approx 10\text{ pt}$ / $3.5\text{ mm}$) to deduce the genuine physical optical DPI and true physical dimensions of the book sheet.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **High**
+- **Substep 4.1.2: CLI & Manifest Dimension Controls**
+  - *Description*: Implement explicit command-line flags and manifest properties: `--page-size <w>x<h>` (supporting standard book sizes like `octavo`, `6x9in`, `5.5x8.5in`, `a5`), `--content-box-size <w>x<h>`, and `--input-dpi <dpi>` in [ScanTailorCLI.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCLI/ScanTailorCLI.swift) and [BookPipelineCoordinator.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorPipeline/BookPipelineCoordinator.swift).
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **Medium**
+- **Substep 4.1.3: Anti-Billboard Canvas Normalization & Agent Escalation**
+  - *Description*: Clamp PDF canvas generation so pages never render as 20–30 inch billboards. When physical scale cannot be determined automatically with high confidence and estimated height exceeds $14''$, flag `physicalScaleAmbiguous: true` in the output manifest to trigger AI agent-to-user escalation.
+  - *Proposed Model*: **Flash**
+  - *Effort Level*: **Low**
+
+#### Step 4.2: Glyph-Scale Adaptive Illumination Normalization
+- **Substep 4.2.1: Dynamic Kernel Radius & Sigma Derivation**
+  - *Description*: Refactor [BackgroundNormalizer.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCore/Binarization/BackgroundNormalizer.swift) to dynamically scale morphological closing radius $R_{\text{closing}}$ and Gaussian smoothing $\sigma$ to estimated character $x$-height and stroke width rather than assuming fixed 300/600 DPI, preventing character erosion on high-resolution camera captures.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **High**
+- **Substep 4.2.2: Dual-Pass Illumination Flattening (Anti-Starvation)**
+  - *Description*: Implement dual-pass low-frequency background quotient division to flatten severe illumination ramps across handheld camera captures (such as the upper-vs-lower lighting gradient on Simpson Page 2), ensuring uniform stroke weight and eliminating threshold starvation.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **High**
+
+---
+
+### Phase 5: Page Quadrangle & Desk Excision
+
+#### Step 5.1: Document Quadrangle Detection (`DocumentQuadDetector`)
+- **Substep 5.1.1: Paper Edge & Contrast Boundary Detection**
+  - *Description*: Develop a dedicated 4-corner document quadrangle estimator utilizing multi-scale Canny edge detection, gradient magnitude filtering, and convex hull polygon fitting to detect physical page boundaries against dark or textured table surfaces.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **High**
+- **Substep 5.1.2: Perspective Rectification & Sheet Cropping**
+  - *Description*: Compute the projective homography matrix between detected quadrilateral corners and a rectangular coordinate frame, rectifying non-orthogonal camera perspective and cropping out desk pixels prior to spread splitting and 3D dewarping.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **High**
+
+#### Step 5.2: Pre-Binarization Desk & Shadow Masking
+- **Substep 5.2.1: Pre-Binarization Table Surface Masking**
+  - *Description*: Mask out detected table and external background regions prior to morphological operations and binarization, guaranteeing that dark wooden surfaces never form macro-clusters or pollute text binarization.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **Medium**
+- **Substep 5.2.2: Macro-Cluster Border Cleaning Fallback**
+  - *Description*: Enhance [BorderAndSpeckleCleaner.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCore/Binarization/BorderAndSpeckleCleaner.swift) with an adaptive edge-connectivity fallback to safely excise peripheral dark blocks exceeding the standard $14\%$ strip limit when quadrangle confidence is marginal.
+  - *Proposed Model*: **Flash**
+  - *Effort Level*: **Medium**
+
+---
+
+### Phase 6: Canonical Layout & Agentic Manifest CLI
+
+#### Step 6.1: Running Header Top Alignment & Baseline Stabilization
+- **Substep 6.1.1: Running Header & Top Baseline Detection**
+  - *Description*: Detect uppermost running header text lines across all pages, separating recurring running headers and page folios from body content using height consistency and vertical proximity clustering.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **High**
+- **Substep 6.1.2: Vertical Page Registration Anchor**
+  - *Description*: Align ordinary full-body pages by their running top headers to lock vertical alignment and prevent digital page jitter during reading, while preserving intentional vertical sinkage on anomalous pages (`edgeAnchoredPartial` and `standaloneFloating`).
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **Medium**
+
+#### Step 6.2: Canonical Sizing & Outlier Canvas Isolation
+- **Substep 6.2.1: Consensus Dimension Clustering**
+  - *Description*: Group processed pages into canonical body pages versus legitimate dimensional outliers (e.g. digital repository cover pages, foldout plates) using IQR and median consensus metrics.
+  - *Proposed Model*: **Flash**
+  - *Effort Level*: **Medium**
+- **Substep 6.2.2: Independent Outlier Trim Box**
+  - *Description*: Assign dedicated, isolated PDF canvas dimensions to legitimate outliers in [ApplePDFDocumentWriter.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorAppleBackend/ApplePDFDocumentWriter.swift), preserving their full content without distorting the canonical trim size of the book body.
+  - *Proposed Model*: **Flash**
+  - *Effort Level*: **Low**
+
+#### Step 6.3: Fast-Path `--apply-manifest` CLI Architecture
+- **Substep 6.3.1: Manifest-Driven Per-Page Adjustments**
+  - *Description*: Enable the CLI to ingest an agent-modified manifest JSON via `--apply-manifest <path>`, applying surgical overrides (`contentBox` nudge, `pageSize`, `margins`, `skewDegrees`, `splitCenter`, `dewarpDisable`, `tier`) on a per-page basis.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **Medium**
+- **Substep 6.3.2: Cache-Accelerated Sub-2-Second Re-Rendering Engine**
+  - *Description*: Implement intermediate stage caching (dewarped/binarized rasters) to re-render adjusted pages and compile final PDFs in under two seconds without re-executing full-book OCR or dewarping.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **High**
+
+---
+
+### Phase 7: Verification & Final v1.0.0 Release
+
+#### Step 7.1: Comprehensive Empirical Benchmark Suite
+- **Substep 7.1.1: Multi-Document Benchmark Validation**
+  - *Description*: Execute end-to-end processing across *Flannery 1993*, *Vermeersch 1934*, and *Simpson 1968* to verify all 10 v1.0 release criteria in automated test runs.
+  - *Proposed Model*: **Flash**
+  - *Effort Level*: **Medium**
+- **Substep 7.1.2: Visual & Metric Inspection**
+  - *Description*: Perform deep visual and programmatic verification of output PDFs and diagnostic overlays, confirming zero desk bleed, uniform illumination on Simpson Page 2, and exact physical trim matching.
+  - *Proposed Model*: **Argon**
+  - *Effort Level*: **Medium**
+
+#### Step 7.2: Release Documentation & Changelog Finalization
+- **Substep 7.2.1: CLI Documentation & AI Agent Skill Reference**
+  - *Description*: Update [README.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/README.md) and agent skill instructions with comprehensive documentation of new CLI options, manifest schema, and agentic workflows.
+  - *Proposed Model*: **Flash**
+  - *Effort Level*: **Low**
+- **Substep 7.2.2: Version Tagging & CHANGELOG.md Finalization**
+  - *Description*: Finalize [CHANGELOG.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/CHANGELOG.md) documenting Phases 4 through 7, tag the Git repository with `v1.0.0`, and certify production readiness.
+  - *Proposed Model*: **Flash**
+  - *Effort Level*: **Low**
+
+---
+
+### Complete Execution Matrix
+
+| (Sub)step Number & Name | Brief Description | Model | Effort Level |
+| :--- | :--- | :---: | :---: |
+| **4.1.1: Automatic Font-Scale & Glyph Height Analyzer** | Derives true optical DPI from median glyph height ($\approx 10\text{ pt}$ body text) | **Argon** | **High** |
+| **4.1.2: CLI & Manifest Dimension Controls** | Adds `--page-size`, `--content-box-size`, `--input-dpi` and standard presets | **Argon** | **Medium** |
+| **4.1.3: Anti-Billboard Normalization & Escalation** | Clamps canvas size and sets `physicalScaleAmbiguous: true` warning for agent | **Flash** | **Low** |
+| **4.2.1: Dynamic Kernel Radius & Sigma Derivation** | Scales closing radius and smoothing sigma to font $x$-height / stroke width | **Argon** | **High** |
+| **4.2.2: Dual-Pass Illumination Flattening** | Flattens severe lighting ramps to prevent threshold starvation on camera scans | **Argon** | **High** |
+| **5.1.1: Paper Edge & Contrast Boundary Detection** | Detects 4-corner document quadrangle against wooden desk / dark backgrounds | **Argon** | **High** |
+| **5.1.2: Perspective Rectification & Sheet Cropping** | Rectifies non-orthogonal camera perspective and crops desk pixels | **Argon** | **High** |
+| **5.2.1: Pre-Binarization Table Surface Masking** | Masks out table surfaces prior to binarization and morphological closing | **Argon** | **Medium** |
+| **5.2.2: Macro-Cluster Border Cleaning Fallback** | Fallback border cleaner for edge blobs exceeding 14% strip threshold | **Flash** | **Medium** |
+| **6.1.1: Running Header & Top Baseline Detection** | Distinguishes running headers and body baselines from titles across pages | **Argon** | **High** |
+| **6.1.2: Vertical Page Registration Anchor** | Aligns ordinary pages by top header; preserves intentional anomalous sinkage | **Argon** | **Medium** |
+| **6.2.1: Consensus Dimension Clustering** | Clusters pages into canonical body pages vs legitimate physical outliers | **Flash** | **Medium** |
+| **6.2.2: Independent Outlier Trim Box** | Assigns isolated canvas dimensions to outliers without affecting body trim | **Flash** | **Low** |
+| **6.3.1: Manifest-Driven Per-Page Adjustments** | Implements `--apply-manifest` CLI flag to inject agent-specified overrides | **Argon** | **Medium** |
+| **6.3.2: Cache-Accelerated Sub-2s Re-Rendering** | Caches pipeline intermediates for instant agentic re-renders and tweaks | **Argon** | **High** |
+| **7.1.1: Multi-Document Benchmark Validation** | Executes automated test runs on Flannery, Vermeersch, and Simpson | **Flash** | **Medium** |
+| **7.1.2: Visual & Metric Inspection** | Evaluates diagnostic overlays and PDFs against the 10 v1.0 criteria | **Argon** | **Medium** |
+| **7.2.1: CLI Documentation & Agent Skill Reference** | Documents new CLI options, manifest schema, and agent operating guide | **Flash** | **Low** |
+| **7.2.2: Version Tagging & CHANGELOG Finalization** | Finalizes CHANGELOG.md for Phases 4–7 and tags Git release `v1.0.0` | **Flash** | **Low** |
+
+---
 
 By executing this final roadmap, **ScanTailorReborn** will attain complete v1.0.0 production maturity, delivering flawless, publication-grade document reconstruction across professional flatbed scanners, production photocopiers, and uncalibrated smartphone cameras alike in pair-programming harmony with autonomous AI agents.
