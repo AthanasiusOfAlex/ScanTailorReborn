@@ -215,7 +215,7 @@ public struct BookPipelineCoordinator: Sendable {
         public var gutterTrimWidth: Int
         /// Whether to automatically detect and prune blank sub-page slices (default: `true`).
         public var autoPruneBlankPages: Bool
-        /// Maximum foreground ink density threshold (fraction in `[0, 1]`) to qualify as a blank page candidate (default: `0.005`, i.e. 0.5%).
+        /// Maximum foreground ink density threshold (fraction in `[0, 1]`) to qualify as a blank page candidate (default: `0.010`, i.e. 1.0%).
         public var blankPageInkDensityThreshold: Double
         /// Whether 3D cubic-sheet curvature dewarping is enabled (default: `true`).
         public var enableDewarp: Bool
@@ -246,7 +246,7 @@ public struct BookPipelineCoordinator: Sendable {
             splitMode: PageSplitMode = .automatic,
             gutterTrimWidth: Int = 24,
             autoPruneBlankPages: Bool = true,
-            blankPageInkDensityThreshold: Double = 0.005,
+            blankPageInkDensityThreshold: Double = 0.010,
             enableDewarp: Bool = true,
             minDewarpSagPixelsAt600DPI: Double = 12.0,
             binarizerConfiguration: AdaptiveBinarizer.Configuration = AdaptiveBinarizer.Configuration(
@@ -527,7 +527,13 @@ public struct BookPipelineCoordinator: Sendable {
                                     dpi: configuration.outputDPI,
                                     languages: configuration.ocrLanguages
                                 )
-                                if ocrObservations.isEmpty {
+                                // Require at least one substantive word containing letters with confidence >= 0.60
+                                // to prevent scanner glass dust, specks, or punctuation noise (e.g. "2%" at conf 0.5)
+                                // from keeping empty flatbed / cover slices.
+                                let substantiveWords = ocrObservations.filter { obs in
+                                    obs.confidence >= 0.60 && obs.text.contains { $0.isLetter }
+                                }
+                                if substantiveWords.isEmpty {
                                     isBlankConfirmed = true
                                 }
                             } catch {
