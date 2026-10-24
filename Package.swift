@@ -26,6 +26,10 @@ let package = Package(
             targets: ["ScanTailorAppleBackend"]
         ),
         .library(
+            name: "ScanTailorTesseractBackend",
+            targets: ["ScanTailorTesseractBackend"]
+        ),
+        .library(
             name: "ScanTailorPipeline",
             targets: ["ScanTailorPipeline"]
         ),
@@ -85,6 +89,32 @@ let package = Package(
                 .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
+        .target(
+            name: "CTesseract",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L/opt/homebrew/lib",
+                    "-L/usr/local/lib",
+                    "-Xlinker", "-rpath", "-Xlinker", "/opt/homebrew/lib",
+                    "-Xlinker", "-rpath", "-Xlinker", "/usr/local/lib",
+                    "-Xlinker", "-w"
+                ], .when(platforms: [.macOS])),
+                .linkedLibrary("tesseract"),
+                .linkedLibrary("leptonica")
+            ]
+        ),
+        .target(
+            name: "ScanTailorTesseractBackend",
+            dependencies: [
+                "CTesseract",
+                "ScanTailorContracts"
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
         .executableTarget(
             name: "ScanTailorCLI",
             dependencies: [
@@ -92,6 +122,7 @@ let package = Package(
                 "ScanTailorCore",
                 "ScanTailorPortableBackend",
                 "ScanTailorAppleBackend",
+                "ScanTailorTesseractBackend",
                 "ScanTailorPipeline"
             ],
             swiftSettings: [
@@ -141,6 +172,21 @@ let package = Package(
                 "ScanTailorCore",
                 "ScanTailorPortableBackend",
                 "ScanTailorAppleBackend",
+                "ScanTailorPipeline"
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
+        .testTarget(
+            name: "ScanTailorTesseractTests",
+            dependencies: [
+                "ScanTailorContracts",
+                "ScanTailorCore",
+                "ScanTailorPortableBackend",
+                "ScanTailorAppleBackend",
+                "ScanTailorTesseractBackend",
                 "ScanTailorPipeline"
             ],
             swiftSettings: [

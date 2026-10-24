@@ -135,3 +135,6 @@ public struct GrayscaleBuffer: Sendable, Equatable {
         try pixels.withUnsafeMutableBytes(body)
     }
 }
+
+/// Typealias for continuous-tone 8-bit grayscale raster buffers.
+public typealias GrayscaleImage = GrayscaleBuffer
