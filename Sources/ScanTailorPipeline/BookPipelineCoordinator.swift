@@ -137,6 +137,10 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     public var pages: [PageProcessingRecord]
     /// Sub-page slices pruned during processing (e.g. blank flyleaves or phantom spread halves).
     public var prunedPages: [PrunedPageRecord]
+    /// Optional identifier of the OCR engine used during processing (e.g. "AppleVisionOCREngine", "TesseractOCREngine", "DualOCREngine").
+    public var ocrEngine: String?
+    /// Optional language codes passed to OCR engine during processing.
+    public var ocrLanguages: [String]?
 
     public init(
         processingDPI: Int,
@@ -146,7 +150,9 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         rectoCanonicalFrame: Rect2I,
         sourcePageSplits: [PageSplitDecision],
         pages: [PageProcessingRecord],
-        prunedPages: [PrunedPageRecord] = []
+        prunedPages: [PrunedPageRecord] = [],
+        ocrEngine: String? = nil,
+        ocrLanguages: [String]? = nil
     ) {
         self.processingDPI = processingDPI
         self.outputDPI = outputDPI
@@ -156,6 +162,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.sourcePageSplits = sourcePageSplits
         self.pages = pages
         self.prunedPages = prunedPages
+        self.ocrEngine = ocrEngine
+        self.ocrLanguages = ocrLanguages
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -167,6 +175,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case sourcePageSplits
         case pages
         case prunedPages
+        case ocrEngine
+        case ocrLanguages
     }
 
     public init(from decoder: Decoder) throws {
@@ -179,6 +189,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.sourcePageSplits = try container.decode([PageSplitDecision].self, forKey: .sourcePageSplits)
         self.pages = try container.decode([PageProcessingRecord].self, forKey: .pages)
         self.prunedPages = try container.decodeIfPresent([PrunedPageRecord].self, forKey: .prunedPages) ?? []
+        self.ocrEngine = try container.decodeIfPresent(String.self, forKey: .ocrEngine)
+        self.ocrLanguages = try container.decodeIfPresent([String].self, forKey: .ocrLanguages)
     }
 }
 
@@ -696,7 +708,9 @@ public struct BookPipelineCoordinator: Sendable {
             rectoCanonicalFrame: bookLayout.rectoCanonicalFrame,
             sourcePageSplits: sourceSplits,
             pages: records,
-            prunedPages: prunedPages
+            prunedPages: prunedPages,
+            ocrEngine: ocrEngine.map { String(describing: type(of: $0)) },
+            ocrLanguages: ocrEngine != nil ? configuration.ocrLanguages : nil
         )
 
         return PipelineOutput(

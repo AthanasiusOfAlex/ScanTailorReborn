@@ -15,3 +15,14 @@ public protocol OCREngine: Sendable {
         languages: [String]
     ) async throws(OCRError) -> [RecognizedTextObservation]
 }
+
+/// Available OCR engine implementations.
+public enum OCREngineType: String, Sendable, Equatable, CaseIterable, Codable {
+    /// Apple Vision neural text recognition (`VNRecognizeTextRequest`). Primary and fast on macOS.
+    case apple = "apple"
+    /// Tesseract OCR via `libtesseract` C bindings. Scholarly, Fraktur, Polytonic Greek, Latin, portable.
+    case tesseract = "tesseract"
+    /// Dual-engine synthesis running both Apple Vision and Tesseract concurrently, merging high-confidence and classical text.
+    case dual = "dual"
+}
+

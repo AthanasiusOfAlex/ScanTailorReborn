@@ -4,6 +4,7 @@ import ScanTailorContracts
 import ScanTailorCore
 import ScanTailorPipeline
 import ScanTailorPortableBackend
+import ScanTailorTesseractBackend
 
 @main
 public struct ScanTailorCLI {
@@ -75,6 +76,9 @@ public struct ScanTailorCLI {
         public var firstPageSide: MarginHarmonizer.PageSide = .recto
         public var enableDewarp: Bool = true
         public var enableOCR: Bool = true
+        public var ocrEngineType: OCREngineType? = nil
+        public var ocrLanguages: [String] = ["en-US"]
+        public var tessdataDir: String? = nil
         public var binarizationMethod: AdaptiveBinarizer.Method = .wolfJolion
         public var usePortableBackend: Bool = false
         public var renderAllDiagnostics: Bool = false
@@ -121,6 +125,9 @@ public struct ScanTailorCLI {
         var firstPageSide: MarginHarmonizer.PageSide = .recto
         var enableDewarp = true
         var enableOCR = true
+        var ocrEngineType: OCREngineType? = nil
+        var ocrLanguages: [String] = ["en-US"]
+        var tessdataDir: String? = nil
         var binarizeMethod: AdaptiveBinarizer.Method = .wolfJolion
         var usePortable = false
         var allDiagnostics = false
@@ -207,6 +214,35 @@ public struct ScanTailorCLI {
                     throw .invalidOptionValue(flag: arg, value: args[i + 1])
                 }
                 i += 2
+            case "--ocr-engine", "--engine":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                let val = args[i + 1].lowercased()
+                switch val {
+                case "apple", "applevision", "vision":
+                    ocrEngineType = .apple
+                case "tesseract", "tess":
+                    ocrEngineType = .tesseract
+                case "dual", "hybrid", "both":
+                    ocrEngineType = .dual
+                default:
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                i += 2
+            case "--ocr-languages", "--ocr-lang", "--languages", "--lang":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                let val = args[i + 1]
+                let parsed = val.split(whereSeparator: { $0 == "," || $0 == "+" })
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                guard !parsed.isEmpty else {
+                    throw .invalidOptionValue(flag: arg, value: val)
+                }
+                ocrLanguages = parsed
+                i += 2
+            case "--tessdata-dir", "--tessdata":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                tessdataDir = args[i + 1]
+                i += 2
             case "--binarize":
                 guard i + 1 < args.count else { throw .missingValue(flag: arg) }
                 let val = args[i + 1].lowercased()
@@ -268,10 +304,48 @@ public struct ScanTailorCLI {
         opts.firstPageSide = firstPageSide
         opts.enableDewarp = enableDewarp
         opts.enableOCR = enableOCR
+        opts.ocrEngineType = ocrEngineType
+        opts.ocrLanguages = ocrLanguages
+        opts.tessdataDir = tessdataDir
         opts.binarizationMethod = binarizeMethod
         opts.usePortableBackend = usePortable
         opts.renderAllDiagnostics = allDiagnostics
         return opts
+    }
+
+    /// Resolves the effective OCR engine type based on options and language requirements.
+    public static func resolveOCREngineType(options: ProcessOptions) -> OCREngineType {
+        if let explicit = options.ocrEngineType {
+            return explicit
+        }
+        if options.usePortableBackend {
+            return .tesseract
+        }
+        let classicalLangs = Set(["grc", "deu_frak", "frk", "lat", "la", "el-polyton"])
+        let hasClassical = options.ocrLanguages.contains { lang in
+            let lower = lang.lowercased()
+            return classicalLangs.contains(lower) || lower.hasPrefix("grc") || lower.hasPrefix("deu_frak") || lower.hasPrefix("frk")
+        }
+        if hasClassical {
+            return .dual
+        }
+        return .apple
+    }
+
+    /// Constructs the appropriate OCR engine based on options.
+    public static func makeOCREngine(options: ProcessOptions) -> (any OCREngine)? {
+        guard options.enableOCR else { return nil }
+        let engineType = resolveOCREngineType(options: options)
+        switch engineType {
+        case .apple:
+            return AppleVisionOCREngine()
+        case .tesseract:
+            return TesseractOCREngine(tessdataPath: options.tessdataDir)
+        case .dual:
+            let primary = AppleVisionOCREngine()
+            let secondary = TesseractOCREngine(tessdataPath: options.tessdataDir)
+            return DualOCREngine(primary: primary, secondary: secondary)
+        }
     }
 
     public static func executeProcess(_ options: ProcessOptions) async throws {
@@ -295,7 +369,7 @@ public struct ScanTailorCLI {
         let accelerator: any ComputeAccelerator = options.usePortableBackend
             ? PortableComputeAccelerator()
             : MetalComputeAccelerator()
-        let ocrEngine: (any OCREngine)? = options.enableOCR ? AppleVisionOCREngine() : nil
+        let ocrEngine: (any OCREngine)? = makeOCREngine(options: options)
 
         // Load existing manifest if `--manifest` was specified and exists on disk
         var existingManifest: BookProcessingManifest? = nil
@@ -322,7 +396,8 @@ public struct ScanTailorCLI {
             harmonizerConfiguration: harmConfig,
             firstPageSide: options.firstPageSide,
             pageRange: options.pageRange,
-            excludedPages: options.excludedPages
+            excludedPages: options.excludedPages,
+            ocrLanguages: options.ocrLanguages
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -414,6 +489,10 @@ public struct ScanTailorCLI {
         lines.append("Canonical 600 DPI Canvas: \(manifest.canonicalCanvasSizeAtProcessingDPI.width) x \(manifest.canonicalCanvasSizeAtProcessingDPI.height) px")
         lines.append("Verso Canonical Text Frame: \(manifest.versoCanonicalFrame.width) x \(manifest.versoCanonicalFrame.height) at (\(manifest.versoCanonicalFrame.minX), \(manifest.versoCanonicalFrame.minY))")
         lines.append("Recto Canonical Text Frame: \(manifest.rectoCanonicalFrame.width) x \(manifest.rectoCanonicalFrame.height) at (\(manifest.rectoCanonicalFrame.minX), \(manifest.rectoCanonicalFrame.minY))")
+        if let engine = manifest.ocrEngine {
+            let langs = manifest.ocrLanguages?.joined(separator: ", ") ?? "default"
+            lines.append("OCR Engine: \(engine) | Languages: [\(langs)]")
+        }
         lines.append("Total Output Pages: \(manifest.pages.count) (from \(manifest.sourcePageSplits.count) source scan(s))")
         if !manifest.prunedPages.isEmpty {
             lines.append("Pruned Blank Sub-Pages: \(manifest.prunedPages.count)")
@@ -452,7 +531,11 @@ public struct ScanTailorCLI {
       --binarize <method>          Adaptive thresholding: wolf (default) or sauvola
       --no-auto-prune              Disable automatic pruning of blank sub-page slices
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping
-      --no-ocr                     Disable Vision OCR searchable text layer
+      --no-ocr                     Disable OCR searchable text layer
+      --ocr-engine <engine>        OCR engine: apple (default on macOS), tesseract, dual
+      --ocr-languages <langs>      Comma or plus-separated language codes, e.g. "grc+lat", "en-US,de-DE", "frk"
+                                   (aliases: --languages, --ocr-lang)
+      --tessdata-dir <path>        Custom tessdata directory containing .traineddata files
       --portable-backend           Use pure-Swift portable compute accelerator instead of Metal GPU
     """
 }

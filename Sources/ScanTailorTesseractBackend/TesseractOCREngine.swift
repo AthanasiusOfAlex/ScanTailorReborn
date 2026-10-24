@@ -136,6 +136,11 @@ public struct TesseractOCREngine: OCREngine, Sendable {
         self.handlePool = HandlePool()
     }
 
+    /// Convenience initializer creating a `TesseractOCREngine` with an optional custom tessdata path and default languages.
+    public init(tessdataPath: String? = nil, defaultLanguages: [String] = ["eng"]) {
+        self.init(configuration: Configuration(tessdataPath: tessdataPath, defaultLanguages: defaultLanguages))
+    }
+
     // MARK: - Version & Environment Discovery
 
     /// Returns the runtime `libtesseract` version string (e.g., `"5.5.3"`).

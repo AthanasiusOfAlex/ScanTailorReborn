@@ -5,6 +5,7 @@ import PDFKit
 import ScanTailorAppleBackend
 import ScanTailorContracts
 import ScanTailorCore
+import ScanTailorPipeline
 import ScanTailorTesseractBackend
 import Testing
 
@@ -426,5 +427,53 @@ struct TesseractOCREngineTests {
         #expect(results[1]?.contains("SECOND") == true)
         #expect(results[2]?.contains("THIRD") == true)
         #expect(results[3]?.contains("FOURTH") == true)
+    }
+
+    // MARK: - 7. DualOCREngine Synthesis & Searchable PDF Layer
+
+    @Test("DualOCREngine coordinates AppleVision and Tesseract to generate searchable PDF with mixed text")
+    func dualEngineSearchablePDFIntegration() async throws {
+        let (grayscale, binary) = try Self.renderSyntheticTextPage(
+            lines: ["SCANTAYLOR SCHOLARLY DIGITIZATION", "IN PRINCIPIO ERAT VERBUM ET VERBUM"],
+            width: 1400,
+            height: 400,
+            dpi: 300
+        )
+        _ = grayscale
+
+        let visionEngine = AppleVisionOCREngine()
+        let tesseractEngine = TesseractOCREngine()
+        let dualEngine = DualOCREngine(
+            primary: visionEngine,
+            secondary: tesseractEngine,
+            strategy: .mergeAndDeduplicate
+        )
+
+        let observations = try await dualEngine.recognizeText(
+            in: binary,
+            dpi: 300,
+            languages: ["lat", "en-US"]
+        )
+
+        #expect(!observations.isEmpty)
+        let allText = observations.map(\.text).joined(separator: " ").uppercased()
+        #expect(allText.contains("SCANTAYLOR"))
+        #expect(allText.contains("PRINCIPIO") || allText.contains("VERBUM"))
+
+        // Write to PDF using ApplePDFDocumentWriter
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DualOCRTest-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        var writer = try ApplePDFDocumentWriter(destinationURL: tempURL)
+        let pageBox = Rect2D(x: 0, y: 0, width: Double(binary.width) * 72.0 / 300.0, height: Double(binary.height) * 72.0 / 300.0)
+        try writer.appendPage(bitmap: binary, dpi: 300, pageBoxPoints: pageBox, ocrLayer: observations)
+        try writer.finalize()
+
+        // Validate resulting PDF is searchable
+        let pdfDoc = try #require(PDFDocument(url: tempURL))
+        #expect(pdfDoc.pageCount == 1)
+        let matches = pdfDoc.findString("SCANTAYLOR", withOptions: [.caseInsensitive])
+        #expect(!matches.isEmpty)
     }
 }
