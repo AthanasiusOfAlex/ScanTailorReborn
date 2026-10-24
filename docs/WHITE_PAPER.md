@@ -12,7 +12,9 @@
 **ScanTailorReborn** (`scantailor-cli`) is a high-performance, automated, pure **Swift 6** command-line book digitization pipeline designed to transform raw document scans and smartphone photographs into compact, publication-quality 300 DPI 1-bit monochrome PDFs (CCITT Group 4) with invisible searchable OCR text layers.
 
 ### The Agent-in-the-Loop Digitization Philosophy
-No purely deterministic image-processing CLI can anticipate every real-world edge case—such as camera perspective skew, uneven desk lighting, thumb holds, or irregular binding styles—without hundreds of fragile heuristics. **ScanTailorReborn is therefore architected as an Agentic Compute Engine designed to be wielded by an AI coding/digitization assistant (Antigravity, Claude Code, Codex).**
+No purely deterministic image-processing CLI can anticipate every real-world edge case—such as camera perspective skew, uneven desk lighting, thumb holds, or irregular binding styles—without hundreds of fragile heuristics. **ScanTailorReborn is therefore architected as an Agentic Tool designed to be wielded directly from the command line by an AI assistant (Antigravity, Claude Code, Codex).**
+
+Rather than requiring programmatic Swift library bindings, the AI agent interacts with the pipeline just as an expert human operator would: invoking the `scantailor-cli` executable, setting fine-grained command-line options (`--margins`, `--gutter-trim-width`, `--ocr-languages`, `--page-size`), analyzing the machine-readable manifest and visual diagnostic overlays, and iteratively tuning parameters.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
@@ -21,11 +23,11 @@ No purely deterministic image-processing CLI can anticipate every real-world edg
 │  Tier 1: Human User      Sets high-level intent, provides physical book context, and    │
 │                          resolves fundamental ambiguities (e.g., trim size, covers).   │
 ├─────────────────────────────────────────────────────────────────────────────────────────┤
-│  Tier 2: AI Agent        Runs the pipeline, inspects machine-readable JSON manifests,   │
+│  Tier 2: AI Agent        Executes CLI commands, tunes options, inspects JSON manifests, │
 │  (Antigravity / Claude)  analyzes visual diagnostic PNGs, spots anomalies, recalibrates │
 │                          parameters, queries the user when needed, and applies tweaks. │
 ├─────────────────────────────────────────────────────────────────────────────────────────┤
-│  Tier 3: CLI Engine      Performs heavy-lifting compute: 600 DPI Metal GPU shaders,    │
+│  Tier 3: CLI Tool        Performs heavy-lifting compute: 600 DPI Metal GPU shaders,    │
 │  (scantailor-cli)        cubic-sheet dewarp solvers, CCITT Group 4 compression, C-FFI   │
 │                          Tesseract/Vision OCR, and sub-second manifest-driven tweaks.  │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
