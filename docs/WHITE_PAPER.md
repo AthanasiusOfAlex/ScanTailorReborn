@@ -11,12 +11,32 @@
 
 **ScanTailorReborn** (`scantailor-cli`) is a high-performance, automated, pure **Swift 6** command-line book digitization pipeline designed to transform raw document scans and smartphone photographs into compact, publication-quality 300 DPI 1-bit monochrome PDFs (CCITT Group 4) with invisible searchable OCR text layers.
 
-Following the successful implementation of the Phase 1, 2, and 3 architectural enhancements (addressing skew confidence calibration, Quartz TrueType deduplication, dual-mode spine crease tracking, physical gutter trimming, split-boundary noise exclusion zones, blank sub-page auto-pruning, publication margin engines, and multi-engine classical OCR synthesis), the pipeline was rigorously re-evaluated against our initial flatbed and photocopier benchmarks (*Flannery 1993*, *Vermeersch 1934*), and stress-tested against a severely distorted smartphone photograph dataset (*Simpson 1968*).
+### The Agent-in-the-Loop Digitization Philosophy
+No purely deterministic image-processing CLI can anticipate every real-world edge case—such as camera perspective skew, uneven desk lighting, thumb holds, or irregular binding styles—without hundreds of fragile heuristics. **ScanTailorReborn is therefore architected as an Agentic Compute Engine designed to be wielded by an AI coding/digitization assistant (Antigravity, Claude Code, Codex).**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                               The Three-Tier Agentic Model                              │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│  Tier 1: Human User      Sets high-level intent, provides physical book context, and    │
+│                          resolves fundamental ambiguities (e.g., trim size, covers).   │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│  Tier 2: AI Agent        Runs the pipeline, inspects machine-readable JSON manifests,   │
+│  (Antigravity / Claude)  analyzes visual diagnostic PNGs, spots anomalies, recalibrates │
+│                          parameters, queries the user when needed, and applies tweaks. │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│  Tier 3: CLI Engine      Performs heavy-lifting compute: 600 DPI Metal GPU shaders,    │
+│  (scantailor-cli)        cubic-sheet dewarp solvers, CCITT Group 4 compression, C-FFI   │
+│                          Tesseract/Vision OCR, and sub-second manifest-driven tweaks.  │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Following the successful execution of Phases 1, 2, and 3 (recalibrated skew confidence, Quartz TrueType deduplication, dual-mode spine crease tracking, physical gutter trimming, split-boundary noise exclusion zones, blank sub-page auto-pruning, publication margin engines, and multi-engine classical OCR synthesis), the pipeline was rigorously re-evaluated against our initial flatbed and photocopier benchmarks (*Flannery 1993*, *Vermeersch 1934*), and stress-tested against a severely distorted smartphone photograph dataset (*Simpson 1968*).
 
 This white paper establishes:
 1. **Empirical Benchmark Verification**: Detailed comparative results across all three test documents.
 2. **Deep-Dive Diagnostic Findings on Camera Captures**: Mathematical root-cause analysis of illumination falloff, threshold starvation, canvas resolution explosion, and table-surface background intrusion in cell phone photography.
-3. **The "v1.0.0 Production Release Criteria"**: A definitive specification of functional requirements, layout guarantees, lighting invariance standards, and agentic interface capabilities required to declare production readiness.
+3. **The "v1.0.0 Production Release Criteria"**: A definitive specification of functional requirements, layout guarantees, physical scale constraints, lighting invariance standards, and agentic interface capabilities required to declare production readiness.
 
 ---
 
@@ -46,7 +66,7 @@ This white paper establishes:
 
 ### 2.1. Benchmark 1: `flannery.1993.pdf`
 - **Source**: 16 single pages, flat journal scan, digital JSTOR cover page, persistent tracking footers.
-- **Output File**: `06-pdf-tool-test/flannery.1993.pdf` (1.4 MB).
+- **Output File**: `06-pdf-tool-test/flannery.1993.pdf` (1.4 MB, $6.5'' \times 10.1''$).
 - **Key Empirical Observations**:
   1. **Quartz TrueType Deduplication**: File size collapsed from **5.3 MB to 1.4 MB** (a **73.6% reduction**). By instantiating a single canonical 12 pt `CTFont` and scaling glyph placement via `CGContext.textMatrix` and `CGAffineTransform`, duplicate font subset dictionaries were completely eliminated.
   2. **Confidence Metric Normalization**: Recalibrating the Radon projection energy denominator from $4.0$ to $1.5$ in `SkewEstimator` eliminated 100% of false-positive low-confidence warnings on straight pages ($[0.67, 1.00]$).
@@ -56,7 +76,7 @@ This white paper establishes:
 
 ### 2.2. Benchmark 2: `vermeersch.1934.pdf`
 - **Source**: 10 landscape photocopier scans (20 pages), 1934 Ecclesiastical Latin, dark central spine shadow, cylindrical binding warp, and an off-center single title page scan on flatbed.
-- **Output File**: `06-pdf-tool-test/vermeersch.1934.pdf` (1.3 MB, 19 pages).
+- **Output File**: `06-pdf-tool-test/vermeersch.1934.pdf` (1.3 MB, 19 pages, $5.26'' \times 8.6''$).
 - **Key Empirical Observations**:
   1. **Blank Sub-Page Auto-Pruning**:
      - *Problem*: Scan 1 placed a single title page on the scanner bed, generating a blank left flatbed slice that polluted canonical layout calculations and added an empty page to the PDF.
@@ -89,6 +109,7 @@ While `scantailor-cli` processed `simpson.1968.400-403.pdf` end-to-end, close in
 flowchart TD
     subgraph MobileCaptureIssues["Cell Phone Digitization Challenges"]
         A["img2pdf 72 DPI Wrapper"] -->|Points = Pixels| B["Canvas Explosion: 33,600 x 18,900 px (635 MB/page)"]
+        B -->|Scale Distortion| K["Billboard Page Size: Output is 30.1 x 32.0 inches!"]
         B --> C["Kernel Radius Mismatch: R=48 px vs 200 px Glyphs"]
         C --> D["Background Normalizer Eats Ink Strokes"]
         D --> E["Washed-Out / Too Light Thresholding (Page 2)"]
@@ -108,7 +129,19 @@ flowchart TD
 
 ---
 
-### 3.2. Illumination Gradients & Threshold Starvation (The "Too Light" Issue on Page 2)
+### 3.2. Physical Page Size Distortion (The "30-Inch Billboard" Problem)
+- **Observed Behavior**: The output PDF for Simpson 1968 measured **$2167.68 \times 2302.56\text{ points}$**, corresponding to **$30.1 \times 32.0\text{ inches}$** per page!
+- **Root Cause**:
+  In a flatbed scanner or photocopier PDF (like Flannery or Vermeersch), the PDF media box accurately reflects the physical page dimensions ($8.5 \times 11''$ or A4). Consequently, rendering at 300 DPI outputs a PDF with standard physical page dimensions ($5.3 \times 8.6''$).
+  However, with camera photos wrapped by `img2pdf`:
+  - The cell phone sensor captured an authentic $5.5 \times 8.5''$ octavo book.
+  - Because `img2pdf` set $72\text{ DPI}$, the software interpreted the book as being $56''$ wide.
+  - When downsampled to 300 DPI, the output canvas became $9032 \times 9594\text{ px}$, which at 72 pt/in prints as a **giant 2.5-foot billboard**.
+- **Requirement**: The final PDF must match the approximate physical dimensions of the authentic book or article (e.g. $5.5 \times 8.5''$ or $6 \times 9''$). If the content box of the original is $4.5 \times 7.5''$, the PDF page must be proportionally standardized rather than 20–30 inches tall.
+
+---
+
+### 3.3. Illumination Gradients & Threshold Starvation (The "Too Light" Issue on Page 2)
 - **Observed Behavior**: On output page 2 (Page 401 of the dictionary), the upper half of the page exhibits washed-out, overly light thresholding, resulting in broken character strokes.
 - **Empirical Measurement**:
   - Top half of Scan 1: Paper luminance = $214$, Ink luminance = $91$ (Contrast $\Delta = 123$).
@@ -126,7 +159,7 @@ flowchart TD
 
 ---
 
-### 3.3. Table / Desk Background Intrusion
+### 3.4. Table / Desk Background Intrusion
 - **Observed Behavior**: On Page 1, the detected content box stretched to `{x: 2, y: 3, w: 18123, h: 18897}`, encompassing almost the entire page slice.
 - **Root Cause**:
   - The cell phone photo captured the wooden desk to the left of the book ($x = 0..608$ in raw coordinates, representing $15\%$ of the image width).
@@ -151,10 +184,10 @@ graph TD
         C4["4. Running Header Top Alignment"]
         C5["5. Anomalous Page Sinkage Preservation"]
         C6["6. Canonical Size & Outlier Isolation"]
-        C7["7. Scale-Invariant Illumination Normalization"]
-        C8["8. Camera Perspective Quadrangle Rectification"]
-        C9["9. Deterministic AI-Agent Override CLI"]
-        C10["10. Native Camera Ingestion (No 72 DPI Bloat)"]
+        C7["7. Realistic Physical Dimensions (Anti-Billboard)"]
+        C8["8. Scale-Invariant Illumination Normalization"]
+        C9["9. Camera Perspective Quadrangle Rectification"]
+        C10["10. Deterministic AI-Agent Override CLI (--apply-manifest)"]
     end
 ```
 
@@ -183,18 +216,22 @@ graph TD
 
 ---
 
-### Optical & AI-Agent Automation Criteria
-7. **Scale-Invariant Illumination Normalization (Fixing Threshold Starvation)**:
+### Physical Scale, Illumination & AI-Agent Automation Criteria
+7. **Realistic Physical Page Dimensions (Anti-Billboard Guarantee)**:
+   - The final output PDF must have page dimensions that approximately match the authentic dimensions of the original book or journal (e.g., $5.5 \times 8.5''$, $6 \times 9''$, or A5).
+   - If the content box of the original is $4.5 \times 7.5''$, the output PDF page must measure approximately $5.5 \times 8.5''$, **never figuring as 20–30 inches tall**.
+   - **Resolution Architecture**:
+     1. *Automatic Font-Scale Heuristic*: Measures median glyph height ($H_{\text{glyph}}$) from initial OCR/component statistics. Standard book typography is $\approx 10\text{ pt}$ ($3.5\text{ mm}$); if glyphs measure $200\text{ px}$, the true physical scale is derived automatically.
+     2. *CLI / Manifest Dimensions*: Explicit flags `--page-size <w>x<h>` (e.g. `6x9in`, `a5`), `--content-box-size <w>x<h>`, or `--input-dpi <dpi>`.
+     3. *Agent-to-User Escalation*: If physical scale cannot be resolved with certainty and estimated page height exceeds $14''$, the pipeline marks `physicalScaleAmbiguous: true` in the manifest. The AI agent detects this warning and prompts the user via interactive selection (e.g. Standard Octavo, Trade Paperback, Journal A4, or Custom).
+
+8. **Scale-Invariant Illumination Normalization (Fixing Threshold Starvation)**:
    - `BackgroundNormalizer` must dynamically calculate its morphological closing radius and Gaussian smoothing scale based on the **estimated font x-height / stroke thickness**, rather than relying on an assumed physical DPI.
    - Illumination ramps across handheld captures (e.g., top-to-bottom or center-to-edge lighting differences) must be completely flattened prior to thresholding, ensuring uniform stroke weight across the entire page.
 
-8. **Camera Perspective & Quadrangle Rectification**:
+9. **Camera Perspective & Quadrangle Rectification**:
    - The pipeline must incorporate an automated 4-corner document quadrangle detector (`DocumentQuadDetector`).
    - Handheld camera exposures taken at non-orthogonal angles must be homographically rectified (keystoning removed) to a flat rectangular plane prior to cylindrical spine dewarping.
-
-9. **Native Camera Image Ingestion (Zero-Bloat I/O)**:
-   - The pipeline must directly accept raw image files (`.jpg`, `.jpeg`, `.png`, `.tiff`) and image-wrapper PDFs without assuming a $72\text{ pt/in}$ point grid.
-   - When processing camera images, internal rasterization must match the native sensor resolution or a normalized $600\text{ DPI}$ target based on physical book size, preventing the $33,600\text{ px}$ canvas explosion.
 
 10. **Deterministic AI-Agent Intervention & Override Architecture**:
     - An AI agent driving `scantailor-cli` must be able to inspect the machine-readable manifest (`--manifest book-manifest.json`), evaluate page-by-page diagnostic metrics, and issue surgical adjustments without re-running the entire book:
@@ -202,7 +239,7 @@ graph TD
       # Agent applies precise per-page overrides from a modified manifest in < 2 seconds:
       scantailor-cli process input.pdf -o output.pdf --apply-manifest modified-manifest.json
       ```
-    - Overrides must support: `contentBox` nudge (in inches, mm, or px), `skewDegrees`, `splitCenter`, `dewarpDisable`, and `tier` reassignment.
+    - Overrides must support: `contentBox` nudge (in inches, mm, or px), `pageSize`, `skewDegrees`, `splitCenter`, `dewarpDisable`, and `tier` reassignment.
 
 ---
 
@@ -210,9 +247,10 @@ graph TD
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    Phase 4: Camera Ingestion & Scale Invariance             │
-│  - Task 4.1: Camera-wrapper PDF DPI detection & direct image file ingestion  │
+│                    Phase 4: Physical Scale & Scale-Invariant Lighting       │
+│  - Task 4.1: Camera-wrapper PDF DPI detection & --page-size / --input-dpi   │
 │  - Task 4.2: Glyph-scale adaptive background normalization (anti-starvation)│
+│  - Task 4.3: Physical scale warning & interactive agent-prompt escalation   │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │
 ┌──────────────────────────────────────▼──────────────────────────────────────┐
@@ -225,8 +263,8 @@ graph TD
 │                Phase 6: Canonical Layout & Agentic Manifest CLI              │
 │  - Task 6.1: Top-header vertical alignment anchor for running pages          │
 │  - Task 6.2: Outlier canvas sizing (covers & foldouts vs canonical body)    │
-│  - Task 6.3: CLI `--apply-manifest` fast-path for agentic editing           │
+│  - Task 6.3: CLI `--apply-manifest` fast-path for sub-2-second agent tweaks │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-By executing this final roadmap, **ScanTailorReborn** will attain complete v1.0.0 production maturity, delivering flawless, publication-grade document reconstruction across professional flatbed scanners, production photocopiers, and uncalibrated smartphone cameras alike.
+By executing this final roadmap, **ScanTailorReborn** will attain complete v1.0.0 production maturity, delivering flawless, publication-grade document reconstruction across professional flatbed scanners, production photocopiers, and uncalibrated smartphone cameras alike in pair-programming harmony with autonomous AI agents.
