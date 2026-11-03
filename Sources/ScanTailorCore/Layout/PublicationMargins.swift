@@ -75,6 +75,11 @@ public struct PublicationMargins: Sendable, Equatable, Codable {
                 guard let val = Double(numStr), val >= 0 else { return nil }
                 return Dimension(value: val, unit: .millimeters)
             }
+            if trimmed.hasSuffix("cm") || trimmed.hasSuffix("centimeter") || trimmed.hasSuffix("centimeters") {
+                let numStr = trimmed.filter { $0.isNumber || $0 == "." || $0 == "-" }
+                guard let val = Double(numStr), val >= 0 else { return nil }
+                return Dimension(value: val * 10.0, unit: .millimeters)
+            }
             if trimmed.hasSuffix("px") || trimmed.hasSuffix("pixel") || trimmed.hasSuffix("pixels") {
                 let numStr = trimmed.filter { $0.isNumber || $0 == "." || $0 == "-" }
                 guard let val = Double(numStr), val >= 0 else { return nil }

@@ -78,23 +78,75 @@ public struct AdaptiveBinarizer: Sendable {
         self.configuration = configuration
     }
 
+    /// Derives the local adaptive thresholding half-window radius in full-resolution source pixels,
+    /// scaling dynamically to measured character $x$-height and vertical stem stroke width when available
+    /// so thick camera or display strokes never suffer interior window starvation.
+    /// - Parameters:
+    ///   - source: Input grayscale image.
+    ///   - glyphScale: Optional measured glyph scale in `source` pixel coordinates.
+    /// - Returns: Half-window radius in pixels (`windowSideLength = 2 * radius + 1`).
+    public func deriveWindowRadius(
+        for source: borrowing GrayscaleBuffer,
+        glyphScale: BackgroundNormalizer.GlyphScale? = nil
+    ) -> Int {
+        let minDim = max(1, min(source.width, source.height))
+        let dpiScale = Double(max(72, source.dpi)) / 300.0
+        let dpiRadius = max(2.0, Double(configuration.referenceWindowRadiusAt300DPI) * dpiScale)
+
+        let allowGlyphAdaptation = configuration.backgroundNormalization?.enableGlyphScaleAdaptation ?? true
+        let minConfidence = configuration.backgroundNormalization?.minimumGlyphConfidence ?? 0.35
+
+        if allowGlyphAdaptation,
+           let gs = glyphScale,
+           gs.confidence >= minConfidence,
+           gs.xHeightPixels.isFinite, gs.xHeightPixels >= 3.0,
+           gs.strokeWidthPixels.isFinite, gs.strokeWidthPixels >= 1.0
+        {
+            let userWindowScale = Double(configuration.referenceWindowRadiusAt300DPI) / 25.0
+            let xRadius = 1.25 * userWindowScale * gs.xHeightPixels
+            let strokeRadius = 6.25 * userWindowScale * gs.strokeWidthPixels
+            let capRadius: Double
+            if let capH = gs.capHeightPixels, capH.isFinite, capH > 0.0 {
+                capRadius = 0.85 * userWindowScale * capH
+            } else {
+                capRadius = 0.0
+            }
+            let rawGlyphRadius = max(xRadius, max(strokeRadius, capRadius))
+            let minAllowed = (gs.confidence < 0.55) ? max(4.0, 0.50 * dpiRadius) : 4.0
+            let maxAllowed = max(minAllowed, Double(minDim) * 0.35)
+            return max(2, Int(min(maxAllowed, max(minAllowed, rawGlyphRadius)).rounded()))
+        }
+
+        return max(2, Int(dpiRadius.rounded()))
+    }
+
     /// Binarizes `source` into a packed 1-bit `BinaryBitmap` (`1 = black ink`, `0 = white paper`).
     /// - Parameters:
     ///   - source: Input grayscale image.
     ///   - accelerator: Compute accelerator used for integral buffer construction and optional background smoothing.
+    ///   - glyphScale: Optional pre-measured glyph scale in `source` pixel coordinates.
     /// - Returns: A `BinaryBitmap` of the same width and height as `source`.
     public func binarize(
         _ source: borrowing GrayscaleBuffer,
-        accelerator: any ComputeAccelerator
+        accelerator: any ComputeAccelerator,
+        glyphScale: BackgroundNormalizer.GlyphScale? = nil
     ) -> BinaryBitmap {
         if let bgConfig = configuration.backgroundNormalization {
             let normalizer = BackgroundNormalizer(configuration: bgConfig)
-            let normalized = normalizer.normalize(source, accelerator: accelerator)
-            let integral = accelerator.integralImage(of: normalized)
-            return binarize(normalized, integralBuffer: integral)
+            let normResult = normalizer.normalizeWithTelemetry(
+                source,
+                accelerator: accelerator,
+                glyphScale: glyphScale
+            )
+            let integral = accelerator.integralImage(of: normResult.buffer)
+            return binarize(
+                normResult.buffer,
+                integralBuffer: integral,
+                glyphScale: normResult.parameters.resolvedGlyphScale ?? glyphScale
+            )
         } else {
             let integral = accelerator.integralImage(of: source)
-            return binarize(source, integralBuffer: integral)
+            return binarize(source, integralBuffer: integral, glyphScale: glyphScale)
         }
     }
 
@@ -102,18 +154,19 @@ public struct AdaptiveBinarizer: Sendable {
     /// - Parameters:
     ///   - source: Input grayscale image.
     ///   - integralBuffer: Precomputed first- and second-order integral tables for `source`.
+    ///   - glyphScale: Optional pre-measured glyph scale in `source` pixel coordinates.
     /// - Returns: A packed 1-bit `BinaryBitmap`.
     public func binarize(
         _ source: borrowing GrayscaleBuffer,
-        integralBuffer: borrowing IntegralBuffer
+        integralBuffer: borrowing IntegralBuffer,
+        glyphScale: BackgroundNormalizer.GlyphScale? = nil
     ) -> BinaryBitmap {
         precondition(
             source.width == integralBuffer.width && source.height == integralBuffer.height,
             "Source dimensions must match IntegralBuffer dimensions"
         )
 
-        let dpiScale = Double(max(72, source.dpi)) / 300.0
-        let radius = max(2, Int((Double(configuration.referenceWindowRadiusAt300DPI) * dpiScale).rounded()))
+        let radius = deriveWindowRadius(for: source, glyphScale: glyphScale)
 
         switch configuration.method {
         case .sauvola:
@@ -139,6 +192,26 @@ public struct AdaptiveBinarizer: Sendable {
     }
 
     // MARK: - Core Implementations
+
+    internal static func binarizeSauvolaExplicitRadius(
+        source: borrowing GrayscaleBuffer,
+        integral: borrowing IntegralBuffer,
+        radius: Int,
+        k: Double,
+        dynamicRange: Double,
+        minDelta: Double,
+        whiteCeiling: UInt8
+    ) -> BinaryBitmap {
+        binarizeSauvola(
+            source: source,
+            integral: integral,
+            radius: max(2, radius),
+            k: k,
+            dynamicRange: dynamicRange,
+            minDelta: minDelta,
+            whiteCeiling: whiteCeiling
+        )
+    }
 
     private static func binarizeSauvola(
         source: borrowing GrayscaleBuffer,
@@ -231,55 +304,40 @@ public struct AdaptiveBinarizer: Sendable {
         let wordsPerRow = (width + 63) / 64
         var words = ContiguousArray<UInt64>(repeating: 0, count: wordsPerRow * height)
 
-        // Pass 1: Determine global minimum pixel intensity M and maximum window standard deviation R_max.
-        // Sampling R_max at a coarse stride of max(1, radius / 4) accurately captures the peak local
-        // standard deviation while keeping Pass 1 negligible in runtime.
-        var minGray: UInt8 = 255
-        var maxVariance: Double = 0.0
+        // Pass 1: Determine outlier-robust dark anchor M and peak active window standard deviation R_max.
+        // Prefer the interior region [8.3%..91.7%] when sufficient contrast exists there so peripheral
+        // camera desk borders or corner wedges cannot drag M to 0 and inflate R_max across the page;
+        // automatically fall back to the full page if the interior is blank.
         let sampleStep = max(1, radius / 4)
+        let marginX = width >= 96 ? (width / 12) : 0
+        let marginY = height >= 96 ? (height / 12) : 0
 
-        source.pixels.withUnsafeBufferPointer { srcPtr in
-            for i in 0..<(width * height) {
-                let v = srcPtr[i]
-                if v < minGray { minGray = v }
-            }
+        var anchors = Self.measureWolfJolionAnchors(
+            source: source,
+            integral: integral,
+            radius: radius,
+            sampleStep: sampleStep,
+            ax0: marginX,
+            ay0: marginY,
+            ax1: width - marginX,
+            ay1: height - marginY
+        )
+        if (marginX > 0 || marginY > 0) && anchors.maxStdDev < 3.0 {
+            anchors = Self.measureWolfJolionAnchors(
+                source: source,
+                integral: integral,
+                radius: radius,
+                sampleStep: sampleStep,
+                ax0: 0,
+                ay0: 0,
+                ax1: width,
+                ay1: height
+            )
         }
 
-        integral.sumTable.withUnsafeBufferPointer { sumPtr in
-            integral.sumSqTable.withUnsafeBufferPointer { sqPtr in
-                var y = 0
-                while y < height {
-                    let y0 = max(0, y - radius)
-                    let y1 = min(height, y + radius + 1)
-                    let r0 = y0 * stride
-                    let r1 = y1 * stride
-                    let hSpan = y1 - y0
-
-                    var x = 0
-                    while x < width {
-                        let x0 = max(0, x - radius)
-                        let x1 = min(width, x + radius + 1)
-                        let invCount = 1.0 / Double((x1 - x0) * hSpan)
-
-                        let sum = (sumPtr[r1 + x1] + sumPtr[r0 + x0]) - (sumPtr[r1 + x0] + sumPtr[r0 + x1])
-                        let sqSum = (sqPtr[r1 + x1] + sqPtr[r0 + x0]) - (sqPtr[r1 + x0] + sqPtr[r0 + x1])
-
-                        let mean = Double(sum) * invCount
-                        let meanSq = Double(sqSum) * invCount
-                        let variance = max(0.0, meanSq - mean * mean)
-                        if variance > maxVariance {
-                            maxVariance = variance
-                        }
-
-                        x += sampleStep
-                    }
-                    y += sampleStep
-                }
-            }
-        }
-
+        let minGray = anchors.minGray
         let minIntensity = Double(minGray)
-        let maxStdDev = maxVariance.squareRoot()
+        let maxStdDev = anchors.maxStdDev
 
         // If the entire image has near-zero variance (uniform sheet), fall back to simple dark check.
         guard maxStdDev > 1e-4 else {
@@ -333,8 +391,8 @@ public struct AdaptiveBinarizer: Sendable {
                                     let variance = max(0.0, meanSq - mean * mean)
                                     let stdDev = min(maxStdDev, variance.squareRoot())
 
-                                    // Wolf-Jolion formula: T = m - k * (1 - s / R) * (m - M)
-                                    let threshold = mean - k * (1.0 - stdDev * invMaxStd) * (mean - minIntensity)
+                                    // Wolf-Jolion formula: T = m - k * (1 - s / R) * max(0, m - M)
+                                    let threshold = mean - k * (1.0 - stdDev * invMaxStd) * max(0.0, mean - minIntensity)
                                     if p <= threshold {
                                         packedWord |= (UInt64(1) << (63 - bit))
                                     }
@@ -349,5 +407,115 @@ public struct AdaptiveBinarizer: Sendable {
         }
 
         return BinaryBitmap(width: width, height: height, words: words)
+    }
+
+    private static func measureWolfJolionAnchors(
+        source: borrowing GrayscaleBuffer,
+        integral: borrowing IntegralBuffer,
+        radius: Int,
+        sampleStep: Int,
+        ax0: Int,
+        ay0: Int,
+        ax1: Int,
+        ay1: Int
+    ) -> (minGray: UInt8, maxStdDev: Double) {
+        let width = source.width
+        let height = source.height
+        let stride = integral.tableStride
+        let rx0 = max(0, min(width, ax0))
+        let rx1 = max(rx0, min(width, ax1))
+        let ry0 = max(0, min(height, ay0))
+        let ry1 = max(ry0, min(height, ay1))
+        let regionCount = (rx1 - rx0) * (ry1 - ry0)
+        guard regionCount > 0 else {
+            return (255, 0.0)
+        }
+
+        var grayHist = [Int](repeating: 0, count: 256)
+        source.pixels.withUnsafeBufferPointer { srcPtr in
+            for y in ry0..<ry1 {
+                let row = y * width
+                for x in rx0..<rx1 {
+                    grayHist[Int(srcPtr[row + x])] += 1
+                }
+            }
+        }
+
+        let targetDarkRank = max(1, regionCount / 2000)
+        var cumDark = 0
+        var resolvedMinGray: UInt8 = 255
+        for g in 0..<256 {
+            cumDark += grayHist[g]
+            if cumDark >= targetDarkRank {
+                resolvedMinGray = UInt8(g)
+                break
+            }
+        }
+
+        var maxVariance: Double = 0.0
+        var stdHist = [Int](repeating: 0, count: 256)
+        var stdBinPeak = [Double](repeating: 0.0, count: 256)
+        var activeCount = 0
+
+        integral.sumTable.withUnsafeBufferPointer { sumPtr in
+            integral.sumSqTable.withUnsafeBufferPointer { sqPtr in
+                var y = ry0
+                while y < ry1 {
+                    let y0 = max(0, y - radius)
+                    let y1 = min(height, y + radius + 1)
+                    let r0 = y0 * stride
+                    let r1 = y1 * stride
+                    let hSpan = y1 - y0
+
+                    var x = rx0
+                    while x < rx1 {
+                        let x0 = max(0, x - radius)
+                        let x1 = min(width, x + radius + 1)
+                        let invCount = 1.0 / Double((x1 - x0) * hSpan)
+
+                        let sum = (sumPtr[r1 + x1] + sumPtr[r0 + x0]) - (sumPtr[r1 + x0] + sumPtr[r0 + x1])
+                        let sqSum = (sqPtr[r1 + x1] + sqPtr[r0 + x0]) - (sqPtr[r1 + x0] + sqPtr[r0 + x1])
+
+                        let mean = Double(sum) * invCount
+                        let meanSq = Double(sqSum) * invCount
+                        let variance = max(0.0, meanSq - mean * mean)
+                        if variance > maxVariance {
+                            maxVariance = variance
+                        }
+                        if variance > 4.0 {
+                            let s = variance.squareRoot()
+                            let bin = min(255, max(0, Int(s * 2.0)))
+                            stdHist[bin] += 1
+                            if s > stdBinPeak[bin] {
+                                stdBinPeak[bin] = s
+                            }
+                            activeCount += 1
+                        }
+
+                        x += sampleStep
+                    }
+                    y += sampleStep
+                }
+            }
+        }
+
+        let resolvedMaxStdDev: Double
+        if activeCount >= 16 {
+            let targetStdRank = max(1, (activeCount * 98 + 99) / 100)
+            var cumStd = 0
+            var pctStd = maxVariance.squareRoot()
+            for bin in 0..<256 {
+                cumStd += stdHist[bin]
+                if cumStd >= targetStdRank {
+                    pctStd = stdBinPeak[bin]
+                    break
+                }
+            }
+            resolvedMaxStdDev = pctStd
+        } else {
+            resolvedMaxStdDev = maxVariance.squareRoot()
+        }
+
+        return (resolvedMinGray, resolvedMaxStdDev)
     }
 }

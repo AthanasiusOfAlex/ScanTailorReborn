@@ -50,6 +50,10 @@ public struct MarginHarmonizer: Sendable {
         }
         /// Configurable publication margins (top, bottom, left, right, inner, outer).
         public var margins: PublicationMargins
+        /// Optional explicit target output page trim size (`--page-size`), overriding automatic canvas sizing.
+        public var targetPageSize: PhysicalSizeSpec?
+        /// Optional explicit canonical text block size (`--content-box-size`), overriding statistical 85th-percentile estimation.
+        public var targetContentBoxSize: PhysicalSizeSpec?
         /// Maximum fractional width deviation from `canonicalFrame.width` for a page to qualify as full-width (`Tier 1` or `Tier 2`).
         public var fullWidthToleranceFraction: Double
         /// Maximum fractional height deviation from `canonicalFrame.height` for a page to qualify as `Tier 1 (fullBody)`.
@@ -65,6 +69,8 @@ public struct MarginHarmonizer: Sendable {
 
         public init(
             margins: PublicationMargins = .publicationDefault,
+            targetPageSize: PhysicalSizeSpec? = nil,
+            targetContentBoxSize: PhysicalSizeSpec? = nil,
             canonicalHorizontalMarginAt600DPI: Int? = nil,
             canonicalVerticalMarginAt600DPI: Int? = nil,
             fullWidthToleranceFraction: Double = 0.08,
@@ -84,6 +90,8 @@ public struct MarginHarmonizer: Sendable {
                 m.bottom = PublicationMargins.Dimension(value: Double(max(0, v)) / 600.0, unit: .inches)
             }
             self.margins = m
+            self.targetPageSize = targetPageSize
+            self.targetContentBoxSize = targetContentBoxSize
             self.fullWidthToleranceFraction = min(max(0.01, fullWidthToleranceFraction), 0.30)
             self.fullHeightToleranceFraction = min(max(0.01, fullHeightToleranceFraction), 0.30)
             self.minPartialHeightFraction = min(max(0.05, minPartialHeightFraction), 0.85)
@@ -202,12 +210,35 @@ public struct MarginHarmonizer: Sendable {
         detector: ContentBoxDetector = ContentBoxDetector()
     ) -> BookLayoutModel {
         guard !pages.isEmpty else {
-            let fallbackCanvas = Size2I(width: 3000, height: 4500)
-            let fallbackFrame = Rect2I(x: 300, y: 360, width: 2400, height: 3780)
+            if configuration.targetPageSize == nil && configuration.targetContentBoxSize == nil {
+                let fallbackCanvas = Size2I(width: 3000, height: 4500)
+                let fallbackFrame = Rect2I(x: 300, y: 360, width: 2400, height: 3780)
+                return BookLayoutModel(
+                    canvasSize: fallbackCanvas,
+                    versoCanonicalFrame: fallbackFrame,
+                    rectoCanonicalFrame: fallbackFrame,
+                    pagePlans: []
+                )
+            }
+            let fallbackDPI = 600
+            let (vTop, vBot) = configuration.margins.verticalMargins(dpi: fallbackDPI)
+            let vHoriz = configuration.margins.horizontalMargins(for: .verso, dpi: fallbackDPI)
+            let rHoriz = configuration.margins.horizontalMargins(for: .recto, dpi: fallbackDPI)
+            let explicitPage = configuration.targetPageSize?.sizeInPixels(atDPI: fallbackDPI)
+            let explicitBox = configuration.targetContentBoxSize?.sizeInPixels(atDPI: fallbackDPI)
+            let textW = explicitBox?.width ?? max(1, (explicitPage?.width ?? 3000) - min(vHoriz.left + vHoriz.right, rHoriz.left + rHoriz.right))
+            let textH = explicitBox?.height ?? max(1, (explicitPage?.height ?? 4500) - (vTop + vBot))
+            let canvasW = explicitPage?.width ?? max(textW + vHoriz.left + vHoriz.right, textW + rHoriz.left + rHoriz.right)
+            let canvasH = explicitPage?.height ?? (textH + vTop + vBot)
+            let clampedTextW = min(max(1, canvasW), max(1, textW))
+            let clampedTextH = min(max(1, canvasH), max(1, textH))
+            let topY = Self.proportionalOrigin(span: clampedTextH, canvasSpan: max(1, canvasH), leadingMargin: vTop, trailingMargin: vBot)
+            let versoX = Self.proportionalOrigin(span: clampedTextW, canvasSpan: max(1, canvasW), leadingMargin: vHoriz.left, trailingMargin: vHoriz.right)
+            let rectoX = Self.proportionalOrigin(span: clampedTextW, canvasSpan: max(1, canvasW), leadingMargin: rHoriz.left, trailingMargin: rHoriz.right)
             return BookLayoutModel(
-                canvasSize: fallbackCanvas,
-                versoCanonicalFrame: fallbackFrame,
-                rectoCanonicalFrame: fallbackFrame,
+                canvasSize: Size2I(width: max(1, canvasW), height: max(1, canvasH)),
+                versoCanonicalFrame: Rect2I(x: versoX, y: topY, width: clampedTextW, height: clampedTextH),
+                rectoCanonicalFrame: Rect2I(x: rectoX, y: topY, width: clampedTextW, height: clampedTextH),
                 pagePlans: []
             )
         }
@@ -220,22 +251,30 @@ public struct MarginHarmonizer: Sendable {
         let minHMargin = min(versoMargins.left + versoMargins.right, rectoMargins.left + rectoMargins.right)
         let minVMargin = topMargin + bottomMargin
 
+        let explicitCanvasSize = configuration.targetPageSize?.sizeInPixels(atDPI: referenceDPI)
+        let explicitContentBoxSize = configuration.targetContentBoxSize?.sizeInPixels(atDPI: referenceDPI)
+
         // Step 1: Collect raw non-empty content widths and heights to estimate the 75th-percentile
-        // canonical width prior for Pass 2 smudge outlier rejection.
+        // canonical width prior for Pass 2 smudge outlier rejection (or use explicit `--content-box-size` width).
         let rawBoxes = pages.compactMap(\.detection.contentBox).filter { !$0.isEmpty }
         let medianPageWidth = Self.percentileInt(pages.map(\.pageSize.width), p: 0.50) ?? pages[0].pageSize.width
         let medianPageHeight = Self.percentileInt(pages.map(\.pageSize.height), p: 0.50) ?? pages[0].pageSize.height
 
-        // Filter out tiny standalone boxes (e.g., < 35% of page width) when computing the body-width prior
-        // if substantial body pages exist.
-        let substantialWidths = rawBoxes.map(\.width).filter { $0 >= medianPageWidth * 35 / 100 }
-        let widthSamplesForPrior = substantialWidths.isEmpty ? rawBoxes.map(\.width) : substantialWidths
-        let filteredWidthSamples = Self.filterOutliersIQR(
-            widthSamplesForPrior,
-            maxDeviationFraction: configuration.canonicalDimensionOutlierToleranceFraction,
-            iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
-        )
-        let priorCanonicalWidth = Self.percentileInt(filteredWidthSamples, p: 0.75) ?? (medianPageWidth * 70 / 100)
+        let priorCanonicalWidth: Int
+        if let explicitBox = explicitContentBoxSize {
+            priorCanonicalWidth = max(1, explicitBox.width)
+        } else {
+            // Filter out tiny standalone boxes (e.g., < 35% of page width) when computing the body-width prior
+            // if substantial body pages exist.
+            let substantialWidths = rawBoxes.map(\.width).filter { $0 >= medianPageWidth * 35 / 100 }
+            let widthSamplesForPrior = substantialWidths.isEmpty ? rawBoxes.map(\.width) : substantialWidths
+            let filteredWidthSamples = Self.filterOutliersIQR(
+                widthSamplesForPrior,
+                maxDeviationFraction: configuration.canonicalDimensionOutlierToleranceFraction,
+                iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
+            )
+            priorCanonicalWidth = Self.percentileInt(filteredWidthSamples, p: 0.75) ?? (medianPageWidth * 70 / 100)
+        }
 
         // Step 2: Run Pass 2 outlier refinement on any page whose raw content box exceeds
         // priorCanonicalWidth * (1 + pass2OutlierWidthExcessFraction).
@@ -256,8 +295,9 @@ public struct MarginHarmonizer: Sendable {
         }
 
         // Step 3: Estimate canonical text width W_canon and height H_canon from the 85th percentile
-        // of refined body-candidate boxes, with IQR and median deviation outlier rejection to prevent
-        // standalone title pages or oversize foldouts from expanding the canonical text frame.
+        // of refined body-candidate boxes (unless overridden via `targetContentBoxSize`), with IQR and
+        // median deviation outlier rejection to prevent standalone title pages or oversize foldouts from
+        // expanding the canonical text frame.
         let refinedBoxes = refinedDetections.compactMap(\.contentBox).filter { !$0.isEmpty }
         let bodyCandidateBoxes = refinedBoxes.filter { box in
             box.width >= priorCanonicalWidth * 75 / 100
@@ -278,26 +318,71 @@ public struct MarginHarmonizer: Sendable {
             iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
         )
 
-        let canonicalTextWidth = Self.percentileInt(filteredWidths, p: 0.85)
-            ?? max(1, medianPageWidth - minHMargin)
-        let canonicalTextHeight = Self.percentileInt(filteredHeights, p: 0.85)
-            ?? max(1, medianPageHeight - minVMargin)
+        let fallbackBaseWidth = explicitCanvasSize?.width ?? medianPageWidth
+        let fallbackBaseHeight = explicitCanvasSize?.height ?? medianPageHeight
+        let rawCanonicalTextWidth = explicitContentBoxSize?.width
+            ?? Self.percentileInt(filteredWidths, p: 0.85)
+            ?? max(1, fallbackBaseWidth - minHMargin)
+        let rawCanonicalTextHeight = explicitContentBoxSize?.height
+            ?? Self.percentileInt(filteredHeights, p: 0.85)
+            ?? max(1, fallbackBaseHeight - minVMargin)
 
-        // Determine uniform output canvas size:
-        // Large enough to accommodate the median physical page size and the canonical text block + configured margins.
-        let neededVersoW = canonicalTextWidth + versoMargins.left + versoMargins.right
-        let neededRectoW = canonicalTextWidth + rectoMargins.left + rectoMargins.right
-        let canvasWidth = max(medianPageWidth, max(neededVersoW, neededRectoW))
-        let canvasHeight = max(medianPageHeight, canonicalTextHeight + topMargin + bottomMargin)
-        let canvasSize = Size2I(width: max(1, canvasWidth), height: max(1, canvasHeight))
+        let canvasSize: Size2I
+        let canonicalTextWidth: Int
+        let canonicalTextHeight: Int
+        let canonicalTopY: Int
+        let versoLeftX: Int
+        let rectoLeftX: Int
 
-        // Position canonical frames:
-        // If explicit publication margins are provided, align canonical text frames accordingly.
-        // Verso: x = versoMargins.left, y = topMargin
-        // Recto: x = rectoMargins.left, y = topMargin
-        let canonicalTopY = topMargin
-        let versoLeftX = versoMargins.left
-        let rectoLeftX = rectoMargins.left
+        if let explicitCanvas = explicitCanvasSize {
+            let canvasW = max(1, explicitCanvas.width)
+            let canvasH = max(1, explicitCanvas.height)
+            canvasSize = Size2I(width: canvasW, height: canvasH)
+            canonicalTextWidth = min(canvasW, max(1, rawCanonicalTextWidth))
+            canonicalTextHeight = min(canvasH, max(1, rawCanonicalTextHeight))
+            canonicalTopY = Self.proportionalOrigin(
+                span: canonicalTextHeight,
+                canvasSpan: canvasH,
+                leadingMargin: topMargin,
+                trailingMargin: bottomMargin
+            )
+            versoLeftX = Self.proportionalOrigin(
+                span: canonicalTextWidth,
+                canvasSpan: canvasW,
+                leadingMargin: versoMargins.left,
+                trailingMargin: versoMargins.right
+            )
+            rectoLeftX = Self.proportionalOrigin(
+                span: canonicalTextWidth,
+                canvasSpan: canvasW,
+                leadingMargin: rectoMargins.left,
+                trailingMargin: rectoMargins.right
+            )
+        } else if explicitContentBoxSize != nil {
+            canonicalTextWidth = max(1, rawCanonicalTextWidth)
+            canonicalTextHeight = max(1, rawCanonicalTextHeight)
+            let neededVersoW = canonicalTextWidth + versoMargins.left + versoMargins.right
+            let neededRectoW = canonicalTextWidth + rectoMargins.left + rectoMargins.right
+            let canvasW = max(1, max(neededVersoW, neededRectoW))
+            let canvasH = max(1, canonicalTextHeight + topMargin + bottomMargin)
+            canvasSize = Size2I(width: canvasW, height: canvasH)
+            canonicalTopY = topMargin
+            versoLeftX = versoMargins.left
+            rectoLeftX = rectoMargins.left
+        } else {
+            canonicalTextWidth = max(1, rawCanonicalTextWidth)
+            canonicalTextHeight = max(1, rawCanonicalTextHeight)
+            // Determine uniform output canvas size:
+            // Large enough to accommodate the median physical page size and the canonical text block + configured margins.
+            let neededVersoW = canonicalTextWidth + versoMargins.left + versoMargins.right
+            let neededRectoW = canonicalTextWidth + rectoMargins.left + rectoMargins.right
+            let canvasWidth = max(medianPageWidth, max(neededVersoW, neededRectoW))
+            let canvasHeight = max(medianPageHeight, canonicalTextHeight + topMargin + bottomMargin)
+            canvasSize = Size2I(width: max(1, canvasWidth), height: max(1, canvasHeight))
+            canonicalTopY = topMargin
+            versoLeftX = versoMargins.left
+            rectoLeftX = rectoMargins.left
+        }
 
         let versoFrame = Rect2I(
             x: versoLeftX,
@@ -356,7 +441,10 @@ public struct MarginHarmonizer: Sendable {
                 // Lock to the canonical text frame origin so left/right margins and running headers
                 // stay rock-steady across page turns.
                 tier = .fullBody
-                destOrigin = Point2I(x: targetFrame.minX, y: targetFrame.minY)
+                destOrigin = Point2I(
+                    x: Self.clampOrigin(targetFrame.minX, span: box.width, canvasSpan: canvasSize.width),
+                    y: Self.clampOrigin(targetFrame.minY, span: box.height, canvasSpan: canvasSize.height)
+                )
             } else if matchesCanonicalWidth && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height {
                 // Tier 2 — Edge-Anchored Partial Page (e.g. chapter start with top sinkage or chapter end):
                 // Compare how closely the physical top edge vs. physical bottom edge of `box` matches `targetFrame`.
@@ -517,5 +605,20 @@ public struct MarginHarmonizer: Sendable {
     private static func clampOrigin(_ origin: Int, span: Int, canvasSpan: Int) -> Int {
         guard canvasSpan > span else { return 0 }
         return min(max(0, origin), canvasSpan - span)
+    }
+
+    private static func proportionalOrigin(
+        span: Int,
+        canvasSpan: Int,
+        leadingMargin: Int,
+        trailingMargin: Int
+    ) -> Int {
+        let remaining = max(0, canvasSpan - span)
+        let marginSum = max(0, leadingMargin) + max(0, trailingMargin)
+        guard marginSum > 0 else {
+            return remaining / 2
+        }
+        let rawOrigin = Int((Double(remaining) * Double(max(0, leadingMargin)) / Double(marginSum)).rounded())
+        return clampOrigin(rawOrigin, span: span, canvasSpan: canvasSpan)
     }
 }

@@ -141,6 +141,16 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     public var ocrEngine: String?
     /// Optional language codes passed to OCR engine during processing.
     public var ocrLanguages: [String]?
+    /// Optional book-wide typographic glyph metrics and automatic physical scale calibration summary.
+    public var fontScaleEstimate: FontScaleAnalyzer.BookScaleEstimate?
+    /// Optional explicit source optical DPI override (`--input-dpi`).
+    public var inputDPI: Int?
+    /// Optional explicit target output page trim size override (`--page-size`).
+    public var pageSize: PhysicalSizeSpec?
+    /// Optional explicit canonical text block size override (`--content-box-size`).
+    public var contentBoxSize: PhysicalSizeSpec?
+    /// `true` when physical scale could not be determined automatically with high confidence and estimated single-page height exceeded `14"`, requiring AI agent-to-user escalation.
+    public var physicalScaleAmbiguous: Bool
 
     public init(
         processingDPI: Int,
@@ -152,7 +162,12 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         pages: [PageProcessingRecord],
         prunedPages: [PrunedPageRecord] = [],
         ocrEngine: String? = nil,
-        ocrLanguages: [String]? = nil
+        ocrLanguages: [String]? = nil,
+        fontScaleEstimate: FontScaleAnalyzer.BookScaleEstimate? = nil,
+        inputDPI: Int? = nil,
+        pageSize: PhysicalSizeSpec? = nil,
+        contentBoxSize: PhysicalSizeSpec? = nil,
+        physicalScaleAmbiguous: Bool = false
     ) {
         self.processingDPI = processingDPI
         self.outputDPI = outputDPI
@@ -164,6 +179,11 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.prunedPages = prunedPages
         self.ocrEngine = ocrEngine
         self.ocrLanguages = ocrLanguages
+        self.fontScaleEstimate = fontScaleEstimate
+        self.inputDPI = inputDPI
+        self.pageSize = pageSize
+        self.contentBoxSize = contentBoxSize
+        self.physicalScaleAmbiguous = physicalScaleAmbiguous
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -177,6 +197,11 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case prunedPages
         case ocrEngine
         case ocrLanguages
+        case fontScaleEstimate
+        case inputDPI
+        case pageSize
+        case contentBoxSize
+        case physicalScaleAmbiguous
     }
 
     public init(from decoder: Decoder) throws {
@@ -191,6 +216,11 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.prunedPages = try container.decodeIfPresent([PrunedPageRecord].self, forKey: .prunedPages) ?? []
         self.ocrEngine = try container.decodeIfPresent(String.self, forKey: .ocrEngine)
         self.ocrLanguages = try container.decodeIfPresent([String].self, forKey: .ocrLanguages)
+        self.fontScaleEstimate = try container.decodeIfPresent(FontScaleAnalyzer.BookScaleEstimate.self, forKey: .fontScaleEstimate)
+        self.inputDPI = try container.decodeIfPresent(Int.self, forKey: .inputDPI)
+        self.pageSize = try container.decodeIfPresent(PhysicalSizeSpec.self, forKey: .pageSize)
+        self.contentBoxSize = try container.decodeIfPresent(PhysicalSizeSpec.self, forKey: .contentBoxSize)
+        self.physicalScaleAmbiguous = try container.decodeIfPresent(Bool.self, forKey: .physicalScaleAmbiguous) ?? false
     }
 }
 
@@ -208,6 +238,18 @@ public struct BookPipelineCoordinator: Sendable {
         public var processingDPI: Int
         /// Output PDF resolution in DPI (default: `300`, half of `processingDPI`).
         public var outputDPI: Int
+        /// Optional explicit genuine source optical DPI (`--input-dpi`), overriding uncalibrated 72/96-DPI wrapper metadata.
+        public var inputDPI: Int?
+        /// Optional explicit target output page trim size (`--page-size`), forwarded to `harmonizerConfiguration.targetPageSize`.
+        public var targetPageSize: PhysicalSizeSpec? {
+            get { harmonizerConfiguration.targetPageSize }
+            set { harmonizerConfiguration.targetPageSize = newValue }
+        }
+        /// Optional explicit canonical text block size (`--content-box-size`), forwarded to `harmonizerConfiguration.targetContentBoxSize`.
+        public var targetContentBoxSize: PhysicalSizeSpec? {
+            get { harmonizerConfiguration.targetContentBoxSize }
+            set { harmonizerConfiguration.targetContentBoxSize = newValue }
+        }
         /// Spread split mode (`.automatic`, `.singlePage`, or `.twoPageSpread`).
         public var splitMode: PageSplitMode
         /// Central gutter strip trimming width in pixels at 600 DPI physically removed between split pages (default: `24`).
@@ -239,10 +281,17 @@ public struct BookPipelineCoordinator: Sendable {
         public var ocrLanguages: [String]
         /// Confidence threshold in `[0, 1]` below which a page is flagged for diagnostic review (default: `0.75`).
         public var lowConfidenceThreshold: Double
+        /// Whether to automatically measure typographic glyph height and rescale oversized camera/image-wrapper pages (default: `true`).
+        public var enableAutomaticFontScaleCalibration: Bool
+        /// Configuration for automatic typographic font-scale analysis and camera-wrapper DPI deduction.
+        public var fontScaleConfiguration: FontScaleAnalyzer.Configuration
 
         public init(
             processingDPI: Int = 600,
             outputDPI: Int = 300,
+            inputDPI: Int? = nil,
+            targetPageSize: PhysicalSizeSpec? = nil,
+            targetContentBoxSize: PhysicalSizeSpec? = nil,
             splitMode: PageSplitMode = .automatic,
             gutterTrimWidth: Int = 24,
             autoPruneBlankPages: Bool = true,
@@ -260,10 +309,13 @@ public struct BookPipelineCoordinator: Sendable {
             pageRange: ClosedRange<Int>? = nil,
             excludedPages: Set<Int> = [],
             ocrLanguages: [String] = ["en-US"],
-            lowConfidenceThreshold: Double = 0.75
+            lowConfidenceThreshold: Double = 0.75,
+            enableAutomaticFontScaleCalibration: Bool = true,
+            fontScaleConfiguration: FontScaleAnalyzer.Configuration = FontScaleAnalyzer.Configuration()
         ) {
             self.processingDPI = max(150, processingDPI)
             self.outputDPI = max(72, outputDPI)
+            self.inputDPI = inputDPI.map { max(1, $0) }
             self.splitMode = splitMode
             self.gutterTrimWidth = max(0, gutterTrimWidth)
             self.autoPruneBlankPages = autoPruneBlankPages
@@ -273,12 +325,21 @@ public struct BookPipelineCoordinator: Sendable {
             self.binarizerConfiguration = binarizerConfiguration
             self.cleanerConfiguration = cleanerConfiguration
             self.contentDetectorConfiguration = contentDetectorConfiguration
-            self.harmonizerConfiguration = harmonizerConfiguration
+            var harm = harmonizerConfiguration
+            if let targetPageSize {
+                harm.targetPageSize = targetPageSize
+            }
+            if let targetContentBoxSize {
+                harm.targetContentBoxSize = targetContentBoxSize
+            }
+            self.harmonizerConfiguration = harm
             self.firstPageSide = (firstPageSide == .single) ? .recto : firstPageSide
             self.pageRange = pageRange
             self.excludedPages = excludedPages
             self.ocrLanguages = ocrLanguages
             self.lowConfidenceThreshold = min(max(0.0, lowConfidenceThreshold), 1.0)
+            self.enableAutomaticFontScaleCalibration = enableAutomaticFontScaleCalibration
+            self.fontScaleConfiguration = fontScaleConfiguration
         }
     }
 
@@ -322,8 +383,8 @@ public struct BookPipelineCoordinator: Sendable {
         progressHandler: (@Sendable (_ completedPages: Int, _ totalSourcePages: Int) -> Void)? = nil
     ) async throws(PipelineError) -> PipelineOutput {
         let sourceCount = reader.pageCount
-        var sourceGrayPages: [GrayscaleBuffer] = []
-        sourceGrayPages.reserveCapacity(sourceCount)
+        var activeSourceIndices: [Int] = []
+        activeSourceIndices.reserveCapacity(sourceCount)
 
         for srcIdx in 0..<sourceCount {
             let oneBased = srcIdx + 1
@@ -333,22 +394,290 @@ public struct BookPipelineCoordinator: Sendable {
             if configuration.excludedPages.contains(oneBased) {
                 continue
             }
+            activeSourceIndices.append(srcIdx)
+        }
 
+        let effectiveInputDPI = configuration.inputDPI ?? existingManifest?.inputDPI
+        let effectivePageSize = configuration.targetPageSize ?? existingManifest?.pageSize
+        let effectiveContentBoxSize = configuration.targetContentBoxSize ?? existingManifest?.contentBoxSize
+
+        var effectiveRenderDPI = configuration.processingDPI
+        var readerPreScaleDecision: FontScaleAnalyzer.PreRasterScaleDecision? = nil
+
+        if !activeSourceIndices.isEmpty {
+            if let explicitInputDPI = effectiveInputDPI {
+                // Priority 1: Explicit `--input-dpi` overrides declared 72-DPI PDF wrapper metadata directly.
+                let safeInputDPI = max(1, explicitInputDPI)
+                let scaleFactor = 72.0 / Double(safeInputDPI)
+                let shouldRescale = abs(scaleFactor - 1.0) > 1e-4
+                let decision = FontScaleAnalyzer.PreRasterScaleDecision(
+                    shouldRescale: shouldRescale,
+                    scaleCorrectionFactor: shouldRescale ? scaleFactor : 1.0,
+                    declaredBodyPointSize: nil,
+                    inferredSourceOpticalDPI: Double(safeInputDPI),
+                    confidence: 1.0,
+                    probedPageCount: 0
+                )
+                readerPreScaleDecision = decision
+                effectiveRenderDPI = decision.effectiveRenderDPI(forProcessingDPI: configuration.processingDPI)
+            } else {
+                // If no explicit dimension/DPI override is active and `existingManifest` already recorded a prior auto-rescale,
+                // reuse its exact scale correction factor deterministically.
+                if effectivePageSize == nil,
+                   effectiveContentBoxSize == nil,
+                   let priorEstimate = existingManifest?.fontScaleEstimate,
+                   priorEstimate.wasAutoRescaled
+                {
+                    let reusedDecision = FontScaleAnalyzer.PreRasterScaleDecision(
+                        shouldRescale: true,
+                        scaleCorrectionFactor: priorEstimate.appliedScaleCorrectionFactor,
+                        declaredBodyPointSize: priorEstimate.declaredBodyPointSizeBeforeRescale > 0.0
+                            ? priorEstimate.declaredBodyPointSizeBeforeRescale
+                            : nil,
+                        inferredSourceOpticalDPI: priorEstimate.inferredSourceOpticalDPI,
+                        confidence: priorEstimate.confidence,
+                        probedPageCount: priorEstimate.sampledPageCount,
+                        isPhysicalScaleAmbiguous: existingManifest?.physicalScaleAmbiguous ?? false,
+                        wasAntiBillboardClamped: priorEstimate.wasAntiBillboardClamped
+                    )
+                    readerPreScaleDecision = reusedDecision
+                    effectiveRenderDPI = reusedDecision.effectiveRenderDPI(forProcessingDPI: configuration.processingDPI)
+                } else {
+                    var pageBoxesPts: [Rect2D] = []
+                    pageBoxesPts.reserveCapacity(activeSourceIndices.count)
+                    for srcIdx in activeSourceIndices {
+                        do {
+                            let box = try reader.pageBoxPoints(at: srcIdx)
+                            pageBoxesPts.append(box)
+                        } catch {
+                            throw .pdfReadFailed(error)
+                        }
+                    }
+
+                    let declaredSizesInches = pageBoxesPts.map {
+                        Size2D(width: $0.width / 72.0, height: $0.height / 72.0)
+                    }
+                    let fontScaleAnalyzer = FontScaleAnalyzer(configuration: configuration.fontScaleConfiguration)
+
+                    if let targetPage = effectivePageSize {
+                        // Priority 2: Explicit `--page-size` rescales oversized uncalibrated wrappers to match target sheet dimensions.
+                        if fontScaleAnalyzer.areDeclaredPagesOversized(declaredSizesInches) {
+                            let decision = deriveSheetScaleDecision(
+                                targetSinglePageInches: targetPage.sizeInInches,
+                                declaredPageSizesInches: declaredSizesInches,
+                                referenceDeclaredDPI: 72
+                            )
+                            readerPreScaleDecision = decision
+                            effectiveRenderDPI = decision.effectiveRenderDPI(forProcessingDPI: configuration.processingDPI)
+                        } else {
+                            readerPreScaleDecision = FontScaleAnalyzer.PreRasterScaleDecision(
+                                shouldRescale: false,
+                                scaleCorrectionFactor: 1.0,
+                                declaredBodyPointSize: nil,
+                                inferredSourceOpticalDPI: nil,
+                                confidence: 1.0,
+                                probedPageCount: 0
+                            )
+                        }
+                    } else if let targetBox = effectiveContentBoxSize {
+                        // Priority 3: Explicit `--content-box-size` probes oversized wrappers so detected content matches target box size.
+                        if fontScaleAnalyzer.areDeclaredPagesOversized(declaredSizesInches) {
+                            let binarizer = AdaptiveBinarizer(configuration: configuration.binarizerConfiguration)
+                            let cleaner = BorderAndSpeckleCleaner(configuration: configuration.cleanerConfiguration)
+                            let contentDetector = ContentBoxDetector(configuration: configuration.contentDetectorConfiguration)
+                            let probeOffsets = Self.selectProbeIndices(from: activeSourceIndices.count, maxProbes: 3)
+                            let targetBoxInches = targetBox.sizeInInches
+                            var boxScales: [Double] = []
+
+                            for offset in probeOffsets {
+                                let srcIdx = activeSourceIndices[offset]
+                                let boxPts = pageBoxesPts[offset]
+                                let longestInches = max(1.0, max(boxPts.width, boxPts.height) / 72.0)
+                                let rawProbeDPI = Int((3800.0 / longestInches).rounded())
+                                let snappedProbeDPI = (66...78).contains(rawProbeDPI) ? 72 : rawProbeDPI
+                                let probeRenderDPI = min(configuration.processingDPI, max(36, snappedProbeDPI))
+
+                                let probeGray: GrayscaleBuffer
+                                do {
+                                    probeGray = try await reader.rasterizePage(at: srcIdx, targetDPI: probeRenderDPI)
+                                } catch {
+                                    throw .pdfReadFailed(error)
+                                }
+
+                                let probeSplit = PageSplitEstimator.estimateSplit(in: probeGray, mode: configuration.splitMode)
+                                let probeGutterTrim = max(0, Int((Double(configuration.gutterTrimWidth) * Double(probeGray.width) / 4000.0).rounded()))
+                                let probeSlices = PageSplitEstimator.split(probeGray, using: probeSplit, gutterTrimWidth: probeGutterTrim)
+
+                                for slice in probeSlices {
+                                    let sliceSize = Size2I(width: slice.buffer.width, height: slice.buffer.height)
+                                    let isSliceSpread = slice.side == .single && Double(sliceSize.width) > Double(sliceSize.height) * 1.15
+                                    let nominalDPI = FontScaleAnalyzer.nominalProbeDPI(forPixelSize: sliceSize, isLikelySpread: isSliceSpread)
+                                    let nominalGray = GrayscaleBuffer(
+                                        width: slice.buffer.width,
+                                        height: slice.buffer.height,
+                                        dpi: nominalDPI,
+                                        pixels: slice.buffer.pixels
+                                    )
+                                    let probeBinary = binarizer.binarize(nominalGray, accelerator: accelerator)
+                                    let cleanedProbe = cleaner.clean(probeBinary)
+                                    let det = contentDetector.detect(in: cleanedProbe, dpi: nominalDPI, splitSide: slice.side)
+                                    if let cBox = det.contentBox,
+                                       !cBox.isEmpty,
+                                       Double(cBox.height) >= Double(cleanedProbe.height) * 0.25,
+                                       Double(cBox.width) >= Double(cleanedProbe.width) * 0.25
+                                    {
+                                        let detWInches = Double(cBox.width) / Double(probeRenderDPI)
+                                        let detHInches = Double(cBox.height) / Double(probeRenderDPI)
+                                        let s = 0.5 * (targetBoxInches.width / detWInches + targetBoxInches.height / detHInches)
+                                        if s.isFinite && s > 0.0 {
+                                            boxScales.append(s)
+                                        }
+                                    }
+                                }
+                            }
+
+                            let decision: FontScaleAnalyzer.PreRasterScaleDecision
+                            if let medianScale = Self.medianOfSorted(boxScales.sorted()), medianScale < 0.95 {
+                                let clampedScale = min(0.95, max(0.02, medianScale))
+                                decision = FontScaleAnalyzer.PreRasterScaleDecision(
+                                    shouldRescale: true,
+                                    scaleCorrectionFactor: clampedScale,
+                                    declaredBodyPointSize: nil,
+                                    inferredSourceOpticalDPI: 72.0 / clampedScale,
+                                    confidence: 1.0,
+                                    probedPageCount: boxScales.count
+                                )
+                            } else {
+                                let impliedPage = impliedSinglePageInches(forContentBoxInches: targetBoxInches)
+                                decision = deriveSheetScaleDecision(
+                                    targetSinglePageInches: impliedPage,
+                                    declaredPageSizesInches: declaredSizesInches,
+                                    referenceDeclaredDPI: 72
+                                )
+                            }
+                            readerPreScaleDecision = decision
+                            effectiveRenderDPI = decision.effectiveRenderDPI(forProcessingDPI: configuration.processingDPI)
+                        } else {
+                            readerPreScaleDecision = FontScaleAnalyzer.PreRasterScaleDecision(
+                                shouldRescale: false,
+                                scaleCorrectionFactor: 1.0,
+                                declaredBodyPointSize: nil,
+                                inferredSourceOpticalDPI: nil,
+                                confidence: 1.0,
+                                probedPageCount: 0
+                            )
+                        }
+                    } else {
+                        // Priority 4: Automatic `FontScaleAnalyzer` typographic calibration (when enabled) + anti-billboard fallback on oversized wrappers.
+                        if fontScaleAnalyzer.areDeclaredPagesOversized(declaredSizesInches) {
+                            var probeMetrics: [FontScaleAnalyzer.PageGlyphMetrics] = []
+                            var probedSpreadCount = 0
+                            var probedSourceCount = 0
+
+                            if configuration.enableAutomaticFontScaleCalibration {
+                                let binarizer = AdaptiveBinarizer(configuration: configuration.binarizerConfiguration)
+                                let probeOffsets = Self.selectProbeIndices(from: activeSourceIndices.count, maxProbes: 3)
+
+                                for offset in probeOffsets {
+                                    let srcIdx = activeSourceIndices[offset]
+                                    let boxPts = pageBoxesPts[offset]
+                                    let longestInches = max(1.0, max(boxPts.width, boxPts.height) / 72.0)
+                                    let rawProbeDPI = Int((3800.0 / longestInches).rounded())
+                                    let snappedProbeDPI = (66...78).contains(rawProbeDPI) ? 72 : rawProbeDPI
+                                    let probeRenderDPI = min(configuration.processingDPI, max(36, snappedProbeDPI))
+
+                                    let probeGray: GrayscaleBuffer
+                                    do {
+                                        probeGray = try await reader.rasterizePage(at: srcIdx, targetDPI: probeRenderDPI)
+                                    } catch {
+                                        throw .pdfReadFailed(error)
+                                    }
+
+                                    let probeSplit = PageSplitEstimator.estimateSplit(in: probeGray, mode: configuration.splitMode)
+                                    probedSourceCount += 1
+                                    if probeSplit.layoutType == .twoPageSpread {
+                                        probedSpreadCount += 1
+                                    }
+                                    let probeGutterTrim = max(0, Int((Double(configuration.gutterTrimWidth) * Double(probeGray.width) / 4000.0).rounded()))
+                                    let probeSlices = PageSplitEstimator.split(probeGray, using: probeSplit, gutterTrimWidth: probeGutterTrim)
+
+                                    for slice in probeSlices {
+                                        let sliceSize = Size2I(width: slice.buffer.width, height: slice.buffer.height)
+                                        let isSliceSpread = slice.side == .single && Double(sliceSize.width) > Double(sliceSize.height) * 1.15
+                                        let nominalDPI = FontScaleAnalyzer.nominalProbeDPI(forPixelSize: sliceSize, isLikelySpread: isSliceSpread)
+                                        let nominalGray = GrayscaleBuffer(
+                                            width: slice.buffer.width,
+                                            height: slice.buffer.height,
+                                            dpi: nominalDPI,
+                                            pixels: slice.buffer.pixels
+                                        )
+                                        let probeBinary = binarizer.binarize(nominalGray, accelerator: accelerator)
+                                        if let metrics = fontScaleAnalyzer.analyzePage(
+                                            in: probeBinary,
+                                            declaredDPI: probeRenderDPI,
+                                            ocrObservations: []
+                                        ) {
+                                            probeMetrics.append(metrics)
+                                        }
+                                    }
+                                }
+                            }
+
+                            let observedSpread: Bool? = probedSourceCount > 0
+                                ? (probedSpreadCount * 2 >= probedSourceCount)
+                                : nil
+                            let decision = fontScaleAnalyzer.estimatePreRasterScale(
+                                from: probeMetrics,
+                                declaredPageSizesInches: declaredSizesInches,
+                                referenceDeclaredDPI: 72,
+                                splitMode: configuration.splitMode,
+                                observedSpreadLayout: observedSpread
+                            )
+                            readerPreScaleDecision = decision
+                            effectiveRenderDPI = decision.effectiveRenderDPI(forProcessingDPI: configuration.processingDPI)
+                        } else if configuration.enableAutomaticFontScaleCalibration {
+                            readerPreScaleDecision = FontScaleAnalyzer.PreRasterScaleDecision(
+                                shouldRescale: false,
+                                scaleCorrectionFactor: 1.0,
+                                declaredBodyPointSize: nil,
+                                inferredSourceOpticalDPI: nil,
+                                confidence: 1.0,
+                                probedPageCount: 0
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        var sourceGrayPages: [GrayscaleBuffer] = []
+        sourceGrayPages.reserveCapacity(activeSourceIndices.count)
+
+        for srcIdx in activeSourceIndices {
             do {
-                let gray = try await reader.rasterizePage(at: srcIdx, targetDPI: configuration.processingDPI)
-                sourceGrayPages.append(gray)
+                let rawGray = try await reader.rasterizePage(at: srcIdx, targetDPI: effectiveRenderDPI)
+                let stampedGray = (rawGray.dpi == configuration.processingDPI)
+                    ? rawGray
+                    : GrayscaleBuffer(
+                        width: rawGray.width,
+                        height: rawGray.height,
+                        dpi: configuration.processingDPI,
+                        pixels: rawGray.pixels
+                    )
+                sourceGrayPages.append(stampedGray)
             } catch {
                 throw .pdfReadFailed(error)
             }
             progressHandler?(srcIdx + 1, sourceCount)
         }
 
-        return try await processGrayscalePages(
+        return try await processGrayscalePagesImpl(
             sourceGrayPages,
             writer: writer,
             accelerator: accelerator,
             ocrEngine: ocrEngine,
-            existingManifest: existingManifest
+            existingManifest: existingManifest,
+            preScaleDecisionFromReader: readerPreScaleDecision
         )
     }
 
@@ -378,12 +707,278 @@ public struct BookPipelineCoordinator: Sendable {
         ocrEngine: (any OCREngine)? = nil,
         existingManifest: BookProcessingManifest? = nil
     ) async throws(PipelineError) -> PipelineOutput {
+        try await processGrayscalePagesImpl(
+            sourcePages,
+            writer: writer,
+            accelerator: accelerator,
+            ocrEngine: ocrEngine,
+            existingManifest: existingManifest,
+            preScaleDecisionFromReader: nil
+        )
+    }
+
+    private func processGrayscalePagesImpl<Writer: PDFDocumentWriter & ~Copyable>(
+        _ rawSourcePages: [GrayscaleBuffer],
+        writer: consuming Writer,
+        accelerator: any ComputeAccelerator,
+        ocrEngine: (any OCREngine)?,
+        existingManifest: BookProcessingManifest?,
+        preScaleDecisionFromReader: FontScaleAnalyzer.PreRasterScaleDecision?
+    ) async throws(PipelineError) -> PipelineOutput {
+        let effectiveInputDPI = configuration.inputDPI ?? existingManifest?.inputDPI
+        let effectivePageSize = configuration.targetPageSize ?? existingManifest?.pageSize
+        let effectiveContentBoxSize = configuration.targetContentBoxSize ?? existingManifest?.contentBoxSize
+
+        var effectiveHarmonizerConfig = configuration.harmonizerConfiguration
+        effectiveHarmonizerConfig.targetPageSize = effectivePageSize
+        effectiveHarmonizerConfig.targetContentBoxSize = effectiveContentBoxSize
+
         let binarizer = AdaptiveBinarizer(configuration: configuration.binarizerConfiguration)
         let cleaner = BorderAndSpeckleCleaner(configuration: configuration.cleanerConfiguration)
         let tracer = TextLineTracer()
         let dewarpSolver = CylindricalDewarpSolver()
         let contentDetector = ContentBoxDetector(configuration: configuration.contentDetectorConfiguration)
-        let harmonizer = MarginHarmonizer(configuration: configuration.harmonizerConfiguration)
+        let harmonizer = MarginHarmonizer(configuration: effectiveHarmonizerConfig)
+        let fontScaleAnalyzer = FontScaleAnalyzer(configuration: configuration.fontScaleConfiguration)
+
+        var sourcePages = rawSourcePages
+        var effectivePreScaleDecision = preScaleDecisionFromReader
+
+        // Detect and resample direct `GrayscaleBuffer` inputs when not already handled by `processBook(reader:...)`.
+        if effectivePreScaleDecision == nil && !sourcePages.isEmpty {
+            let referenceDeclaredDPI = max(1, sourcePages[0].dpi)
+
+            if let explicitInputDPI = effectiveInputDPI {
+                // Priority 1: Explicit `--input-dpi` overrides declared buffer DPI metadata directly.
+                let safeInputDPI = max(1, explicitInputDPI)
+                let scaleFactor = Double(referenceDeclaredDPI) / Double(safeInputDPI)
+                let shouldRescale = sourcePages.contains { max(1, $0.dpi) != safeInputDPI } || abs(scaleFactor - 1.0) > 1e-4
+                let decision = FontScaleAnalyzer.PreRasterScaleDecision(
+                    shouldRescale: shouldRescale,
+                    scaleCorrectionFactor: shouldRescale ? scaleFactor : 1.0,
+                    declaredBodyPointSize: nil,
+                    inferredSourceOpticalDPI: Double(safeInputDPI),
+                    confidence: 1.0,
+                    probedPageCount: 0
+                )
+                effectivePreScaleDecision = decision
+                sourcePages = Self.resampleOversizedGrayscalePages(
+                    sourcePages,
+                    scaleCorrectionFactor: decision.scaleCorrectionFactor,
+                    explicitOpticalDPI: Double(safeInputDPI),
+                    targetProcessingDPI: configuration.processingDPI,
+                    accelerator: accelerator
+                )
+            } else if effectivePageSize == nil,
+                      effectiveContentBoxSize == nil,
+                      let priorEstimate = existingManifest?.fontScaleEstimate,
+                      priorEstimate.wasAutoRescaled
+            {
+                let reusedDecision = FontScaleAnalyzer.PreRasterScaleDecision(
+                    shouldRescale: true,
+                    scaleCorrectionFactor: priorEstimate.appliedScaleCorrectionFactor,
+                    declaredBodyPointSize: priorEstimate.declaredBodyPointSizeBeforeRescale > 0.0
+                        ? priorEstimate.declaredBodyPointSizeBeforeRescale
+                        : nil,
+                    inferredSourceOpticalDPI: priorEstimate.inferredSourceOpticalDPI,
+                    confidence: priorEstimate.confidence,
+                    probedPageCount: priorEstimate.sampledPageCount,
+                    isPhysicalScaleAmbiguous: existingManifest?.physicalScaleAmbiguous ?? false,
+                    wasAntiBillboardClamped: priorEstimate.wasAntiBillboardClamped
+                )
+                effectivePreScaleDecision = reusedDecision
+                sourcePages = Self.resampleOversizedGrayscalePages(
+                    sourcePages,
+                    scaleCorrectionFactor: reusedDecision.scaleCorrectionFactor,
+                    targetProcessingDPI: configuration.processingDPI,
+                    accelerator: accelerator
+                )
+            } else {
+                let declaredSizesInches = sourcePages.map {
+                    let dpi = Double(max(1, $0.dpi))
+                    return Size2D(width: Double($0.width) / dpi, height: Double($0.height) / dpi)
+                }
+
+                if let targetPage = effectivePageSize {
+                    // Priority 2: Explicit `--page-size` rescales oversized uncalibrated buffers to match target sheet dimensions.
+                    if fontScaleAnalyzer.areDeclaredPagesOversized(declaredSizesInches) {
+                        let decision = deriveSheetScaleDecision(
+                            targetSinglePageInches: targetPage.sizeInInches,
+                            declaredPageSizesInches: declaredSizesInches,
+                            referenceDeclaredDPI: referenceDeclaredDPI
+                        )
+                        effectivePreScaleDecision = decision
+                        if decision.shouldRescale {
+                            sourcePages = Self.resampleOversizedGrayscalePages(
+                                sourcePages,
+                                scaleCorrectionFactor: decision.scaleCorrectionFactor,
+                                targetProcessingDPI: configuration.processingDPI,
+                                accelerator: accelerator
+                            )
+                        }
+                    }
+                } else if let targetBox = effectiveContentBoxSize {
+                    // Priority 3: Explicit `--content-box-size` probes oversized buffers so detected content matches target box size.
+                    if fontScaleAnalyzer.areDeclaredPagesOversized(declaredSizesInches) {
+                        let probeIndices = Self.selectProbeIndices(from: sourcePages.count, maxProbes: 3)
+                        let targetBoxInches = targetBox.sizeInInches
+                        var boxScales: [Double] = []
+
+                        for idx in probeIndices {
+                            let buf = sourcePages[idx]
+                            let srcDPI = Double(max(1, buf.dpi))
+                            let (probeBuf, downsampleScale) = Self.downsampleProbeBufferIfNeeded(buf, maxDimension: 4200)
+                            let probeSplit = PageSplitEstimator.estimateSplit(in: probeBuf, mode: configuration.splitMode)
+                            let probeGutterTrim = max(0, Int((Double(configuration.gutterTrimWidth) * Double(probeBuf.width) / 4000.0).rounded()))
+                            let probeSlices = PageSplitEstimator.split(probeBuf, using: probeSplit, gutterTrimWidth: probeGutterTrim)
+                            let effectiveSliceDPI = max(1e-3, srcDPI * downsampleScale)
+
+                            for slice in probeSlices {
+                                let sliceSize = Size2I(width: slice.buffer.width, height: slice.buffer.height)
+                                let isSliceSpread = slice.side == .single && Double(sliceSize.width) > Double(sliceSize.height) * 1.15
+                                let nominalDPI = FontScaleAnalyzer.nominalProbeDPI(forPixelSize: sliceSize, isLikelySpread: isSliceSpread)
+                                let nominalGray = GrayscaleBuffer(
+                                    width: slice.buffer.width,
+                                    height: slice.buffer.height,
+                                    dpi: nominalDPI,
+                                    pixels: slice.buffer.pixels
+                                )
+                                let probeBinary = binarizer.binarize(nominalGray, accelerator: accelerator)
+                                let cleanedProbe = cleaner.clean(probeBinary)
+                                let det = contentDetector.detect(in: cleanedProbe, dpi: nominalDPI, splitSide: slice.side)
+                                if let cBox = det.contentBox,
+                                   !cBox.isEmpty,
+                                   Double(cBox.height) >= Double(cleanedProbe.height) * 0.25,
+                                   Double(cBox.width) >= Double(cleanedProbe.width) * 0.25
+                                {
+                                    let detWInches = Double(cBox.width) / effectiveSliceDPI
+                                    let detHInches = Double(cBox.height) / effectiveSliceDPI
+                                    let s = 0.5 * (targetBoxInches.width / detWInches + targetBoxInches.height / detHInches)
+                                    if s.isFinite && s > 0.0 {
+                                        boxScales.append(s)
+                                    }
+                                }
+                            }
+                        }
+
+                        let decision: FontScaleAnalyzer.PreRasterScaleDecision
+                        if let medianScale = Self.medianOfSorted(boxScales.sorted()), medianScale < 0.95 {
+                            let clampedScale = min(0.95, max(0.02, medianScale))
+                            decision = FontScaleAnalyzer.PreRasterScaleDecision(
+                                shouldRescale: true,
+                                scaleCorrectionFactor: clampedScale,
+                                declaredBodyPointSize: nil,
+                                inferredSourceOpticalDPI: Double(referenceDeclaredDPI) / clampedScale,
+                                confidence: 1.0,
+                                probedPageCount: boxScales.count
+                            )
+                        } else {
+                            let impliedPage = impliedSinglePageInches(
+                                forContentBoxInches: targetBoxInches,
+                                margins: effectiveHarmonizerConfig.margins
+                            )
+                            decision = deriveSheetScaleDecision(
+                                targetSinglePageInches: impliedPage,
+                                declaredPageSizesInches: declaredSizesInches,
+                                referenceDeclaredDPI: referenceDeclaredDPI
+                            )
+                        }
+                        effectivePreScaleDecision = decision
+                        if decision.shouldRescale {
+                            sourcePages = Self.resampleOversizedGrayscalePages(
+                                sourcePages,
+                                scaleCorrectionFactor: decision.scaleCorrectionFactor,
+                                targetProcessingDPI: configuration.processingDPI,
+                                accelerator: accelerator
+                            )
+                        }
+                    }
+                } else if fontScaleAnalyzer.areDeclaredPagesOversized(declaredSizesInches) {
+                    // Priority 4: Automatic `FontScaleAnalyzer` typographic calibration (when enabled) + anti-billboard fallback on oversized buffers.
+                    var probeMetrics: [FontScaleAnalyzer.PageGlyphMetrics] = []
+                    var probedSpreadCount = 0
+                    var probedSourceCount = 0
+
+                    if configuration.enableAutomaticFontScaleCalibration {
+                        let probeIndices = Self.selectProbeIndices(from: sourcePages.count, maxProbes: 3)
+
+                        for idx in probeIndices {
+                            let buf = sourcePages[idx]
+                            let (probeBuf, downsampleScale) = Self.downsampleProbeBufferIfNeeded(buf, maxDimension: 4200)
+                            let probeSplit = PageSplitEstimator.estimateSplit(in: probeBuf, mode: configuration.splitMode)
+                            probedSourceCount += 1
+                            if probeSplit.layoutType == .twoPageSpread {
+                                probedSpreadCount += 1
+                            }
+                            let probeGutterTrim = max(0, Int((Double(configuration.gutterTrimWidth) * Double(probeBuf.width) / 4000.0).rounded()))
+                            let probeSlices = PageSplitEstimator.split(probeBuf, using: probeSplit, gutterTrimWidth: probeGutterTrim)
+
+                            for slice in probeSlices {
+                                let sliceSize = Size2I(width: slice.buffer.width, height: slice.buffer.height)
+                                let isSliceSpread = slice.side == .single && Double(sliceSize.width) > Double(sliceSize.height) * 1.15
+                                let nominalDPI = FontScaleAnalyzer.nominalProbeDPI(forPixelSize: sliceSize, isLikelySpread: isSliceSpread)
+                                let nominalGray = GrayscaleBuffer(
+                                    width: slice.buffer.width,
+                                    height: slice.buffer.height,
+                                    dpi: nominalDPI,
+                                    pixels: slice.buffer.pixels
+                                )
+                                let probeBinary = binarizer.binarize(nominalGray, accelerator: accelerator)
+                                let srcDPI = max(1, buf.dpi)
+                                if let rawMetrics = fontScaleAnalyzer.analyzePage(
+                                    in: probeBinary,
+                                    declaredDPI: srcDPI,
+                                    ocrObservations: []
+                                ) {
+                                    if downsampleScale < 0.9999 {
+                                        let invScale = 1.0 / downsampleScale
+                                        let fullEm = rawMetrics.inferredEmHeightPixels * invScale
+                                        let scaledMetrics = FontScaleAnalyzer.PageGlyphMetrics(
+                                            xHeightPixels: rawMetrics.xHeightPixels * invScale,
+                                            capHeightPixels: rawMetrics.capHeightPixels * invScale,
+                                            inferredEmHeightPixels: fullEm,
+                                            strokeWidthPixels: rawMetrics.strokeWidthPixels * invScale,
+                                            baselineSpacingPixels: rawMetrics.baselineSpacingPixels.map { $0 * invScale },
+                                            declaredDPI: srcDPI,
+                                            declaredBodyPointSize: fullEm * 72.0 / Double(srcDPI),
+                                            inferredOpticalDPI: fullEm * 72.0 / configuration.fontScaleConfiguration.targetBodyEmPointSize,
+                                            sampledGlyphCount: rawMetrics.sampledGlyphCount,
+                                            chainedLineCount: rawMetrics.chainedLineCount,
+                                            isBimodal: rawMetrics.isBimodal,
+                                            ocrLineCount: rawMetrics.ocrLineCount,
+                                            confidence: rawMetrics.confidence
+                                        )
+                                        probeMetrics.append(scaledMetrics)
+                                    } else {
+                                        probeMetrics.append(rawMetrics)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let observedSpread: Bool? = probedSourceCount > 0
+                        ? (probedSpreadCount * 2 >= probedSourceCount)
+                        : nil
+                    let decision = fontScaleAnalyzer.estimatePreRasterScale(
+                        from: probeMetrics,
+                        declaredPageSizesInches: declaredSizesInches,
+                        referenceDeclaredDPI: referenceDeclaredDPI,
+                        splitMode: configuration.splitMode,
+                        observedSpreadLayout: observedSpread
+                    )
+                    effectivePreScaleDecision = decision
+                    if decision.shouldRescale {
+                        sourcePages = Self.resampleOversizedGrayscalePages(
+                            sourcePages,
+                            scaleCorrectionFactor: decision.scaleCorrectionFactor,
+                            targetProcessingDPI: configuration.processingDPI,
+                            accelerator: accelerator
+                        )
+                    }
+                }
+            }
+        }
 
         // Build lookup table of manual overrides by outputPageIndex if an existing manifest was supplied.
         var overridesByOutputIndex: [Int: PageManualOverride] = [:]
@@ -479,7 +1074,16 @@ public struct BookPipelineCoordinator: Sendable {
                                 displacementGrid: solution.grid,
                                 outputSize: pageSize
                             )
-                            let dewarpedBinary = binarizer.binarize(dewarpedGray, accelerator: accelerator)
+                            let dewarpedGlyphScale = fontScaleAnalyzer.analyzePage(
+                                in: initialCleaned,
+                                declaredDPI: deskewedGray.dpi,
+                                ocrObservations: []
+                            ).map { BackgroundNormalizer.GlyphScale(metrics: $0) }
+                            let dewarpedBinary = binarizer.binarize(
+                                dewarpedGray,
+                                accelerator: accelerator,
+                                glyphScale: dewarpedGlyphScale
+                            )
                             finalCleaned = cleaner.clean(dewarpedBinary)
                             dewarpApplied = true
                         }
@@ -606,7 +1210,19 @@ public struct BookPipelineCoordinator: Sendable {
         var cleanedBitmaps: [BinaryBitmap] = []
         cleanedBitmaps.reserveCapacity(pass1Pages.count)
 
+        let hasExplicitDimensionOverride = (effectiveInputDPI != nil)
+            || (effectivePageSize != nil)
+            || (effectiveContentBoxSize != nil)
+        let wasSourceOversized = (effectivePreScaleDecision?.shouldRescale == true)
+            || (effectivePreScaleDecision?.isPhysicalScaleAmbiguous == true)
+            || (effectivePreScaleDecision?.wasAntiBillboardClamped == true)
+        var anyPageCanvasClamped = false
+        var clampedCanonicalInches: Size2D? = nil
+
         let shouldDownsample2x = (configuration.processingDPI >= configuration.outputDPI * 2)
+        let sampledGlyphPageIndices = Self.selectEvenlySampledIndices(from: pass1Pages.count, maxSamples: 16)
+        var postCalibrationGlyphMetrics: [FontScaleAnalyzer.PageGlyphMetrics] = []
+        postCalibrationGlyphMetrics.reserveCapacity(sampledGlyphPageIndices.count)
 
         for (idx, p1) in pass1Pages.enumerated() {
             var plan = bookLayout.pagePlans[idx]
@@ -658,8 +1274,38 @@ public struct BookPipelineCoordinator: Sendable {
                 }
             }
 
-            let pageWidthPoints = Double(finalBitmap.width) * 72.0 / Double(configuration.outputDPI)
-            let pageHeightPoints = Double(finalBitmap.height) * 72.0 / Double(configuration.outputDPI)
+            let shouldCollectScaleTelemetry = configuration.enableAutomaticFontScaleCalibration || (effectivePreScaleDecision != nil)
+            if shouldCollectScaleTelemetry && sampledGlyphPageIndices.contains(idx) {
+                if let glyphMetrics = fontScaleAnalyzer.analyzePage(
+                    in: framed600,
+                    declaredDPI: configuration.processingDPI,
+                    ocrObservations: ocrObservations
+                ) {
+                    postCalibrationGlyphMetrics.append(glyphMetrics)
+                }
+            }
+
+            var pageWidthPoints = Double(finalBitmap.width) * 72.0 / Double(configuration.outputDPI)
+            var pageHeightPoints = Double(finalBitmap.height) * 72.0 / Double(configuration.outputDPI)
+            if !hasExplicitDimensionOverride {
+                let rawSizeInches = Size2D(width: pageWidthPoints / 72.0, height: pageHeightPoints / 72.0)
+                let needsCanvasClamp: Bool
+                if wasSourceOversized {
+                    needsCanvasClamp = fontScaleAnalyzer.isDeclaredPageOversized(rawSizeInches)
+                } else {
+                    needsCanvasClamp = rawSizeInches.height > configuration.fontScaleConfiguration.maxCalibratedSpreadHeightInches
+                        || rawSizeInches.width > configuration.fontScaleConfiguration.maxCalibratedSpreadWidthInches
+                }
+                if needsCanvasClamp {
+                    let clamped = fontScaleAnalyzer.clampAntiBillboardPageSizeInches(rawSizeInches)
+                    if clamped.wasClamped {
+                        pageWidthPoints = clamped.sizeInches.width * 72.0
+                        pageHeightPoints = clamped.sizeInches.height * 72.0
+                        anyPageCanvasClamped = true
+                        clampedCanonicalInches = clamped.sizeInches
+                    }
+                }
+            }
             let pageBoxPoints = Rect2D(x: 0, y: 0, width: pageWidthPoints, height: pageHeightPoints)
 
             do {
@@ -706,6 +1352,37 @@ public struct BookPipelineCoordinator: Sendable {
             throw .pdfWriteFailed(error)
         }
 
+        let rawCanonicalInches = Size2D(
+            width: Double(bookLayout.canvasSize.width) / Double(configuration.processingDPI),
+            height: Double(bookLayout.canvasSize.height) / Double(configuration.processingDPI)
+        )
+        let effectiveCanonicalInches = clampedCanonicalInches ?? rawCanonicalInches
+
+        let physicalScaleAmbiguous: Bool
+        if hasExplicitDimensionOverride {
+            physicalScaleAmbiguous = false
+        } else if effectivePreScaleDecision?.isPhysicalScaleAmbiguous == true {
+            physicalScaleAmbiguous = true
+        } else if anyPageCanvasClamped
+            && rawCanonicalInches.height > configuration.fontScaleConfiguration.maxCalibratedPortraitHeightInches
+        {
+            physicalScaleAmbiguous = true
+        } else {
+            physicalScaleAmbiguous = false
+        }
+
+        let fontScaleEstimate: FontScaleAnalyzer.BookScaleEstimate?
+        if configuration.enableAutomaticFontScaleCalibration || (effectivePreScaleDecision != nil) {
+            fontScaleEstimate = fontScaleAnalyzer.summarizeBook(
+                postCalibrationMetrics: postCalibrationGlyphMetrics,
+                processingDPI: configuration.processingDPI,
+                canonicalSinglePageSizeInches: effectiveCanonicalInches,
+                preScaleDecision: effectivePreScaleDecision
+            )
+        } else {
+            fontScaleEstimate = nil
+        }
+
         let manifest = BookProcessingManifest(
             processingDPI: configuration.processingDPI,
             outputDPI: configuration.outputDPI,
@@ -716,7 +1393,12 @@ public struct BookPipelineCoordinator: Sendable {
             pages: records,
             prunedPages: prunedPages,
             ocrEngine: ocrEngine.map { String(describing: type(of: $0)) },
-            ocrLanguages: ocrEngine != nil ? configuration.ocrLanguages : nil
+            ocrLanguages: ocrEngine != nil ? configuration.ocrLanguages : nil,
+            fontScaleEstimate: fontScaleEstimate,
+            inputDPI: effectiveInputDPI,
+            pageSize: effectivePageSize,
+            contentBoxSize: effectiveContentBoxSize,
+            physicalScaleAmbiguous: physicalScaleAmbiguous
         )
 
         return PipelineOutput(
@@ -724,5 +1406,210 @@ public struct BookPipelineCoordinator: Sendable {
             outputBitmapsAtOutputDPI: outputBitmaps,
             cleanedBitmapsAtProcessingDPI: cleanedBitmaps
         )
+    }
+
+    // MARK: - Font-Scale Probing & Resampling Helpers
+
+    private func deriveSheetScaleDecision(
+        targetSinglePageInches: Size2D,
+        declaredPageSizesInches: [Size2D],
+        referenceDeclaredDPI: Int
+    ) -> FontScaleAnalyzer.PreRasterScaleDecision {
+        var scales: [Double] = []
+        scales.reserveCapacity(declaredPageSizesInches.count)
+
+        for decl in declaredPageSizesInches where decl.width > 0.0 && decl.height > 0.0 {
+            let isSpread: Bool
+            switch configuration.splitMode {
+            case .twoPageSpread:
+                isSpread = true
+            case .singlePage:
+                isSpread = false
+            case .automatic:
+                isSpread = decl.width > decl.height * 1.15
+            }
+            let expectedSheetW = isSpread ? (targetSinglePageInches.width * 2.0) : targetSinglePageInches.width
+            let expectedSheetH = targetSinglePageInches.height
+            let s = max(expectedSheetW / decl.width, expectedSheetH / decl.height)
+            if s.isFinite && s > 0.0 {
+                scales.append(s)
+            }
+        }
+
+        guard let medianScale = Self.medianOfSorted(scales.sorted()), medianScale < 0.95 else {
+            return FontScaleAnalyzer.PreRasterScaleDecision(
+                shouldRescale: false,
+                scaleCorrectionFactor: 1.0,
+                declaredBodyPointSize: nil,
+                inferredSourceOpticalDPI: nil,
+                confidence: 1.0,
+                probedPageCount: 0
+            )
+        }
+
+        let clampedScale = min(0.95, max(0.02, medianScale))
+        let optDPI = Double(max(1, referenceDeclaredDPI)) / clampedScale
+        return FontScaleAnalyzer.PreRasterScaleDecision(
+            shouldRescale: true,
+            scaleCorrectionFactor: clampedScale,
+            declaredBodyPointSize: nil,
+            inferredSourceOpticalDPI: optDPI,
+            confidence: 1.0,
+            probedPageCount: 0
+        )
+    }
+
+    private func impliedSinglePageInches(
+        forContentBoxInches contentBoxInches: Size2D,
+        margins: PublicationMargins? = nil
+    ) -> Size2D {
+        let activeMargins = margins ?? configuration.harmonizerConfiguration.margins
+        let refDPI = 600
+        let vMargins = activeMargins.verticalMargins(dpi: refDPI)
+        let versoH = activeMargins.horizontalMargins(for: .verso, dpi: refDPI)
+        let rectoH = activeMargins.horizontalMargins(for: .recto, dpi: refDPI)
+        let hPaddingInches = Double(max(versoH.left + versoH.right, rectoH.left + rectoH.right)) / Double(refDPI)
+        let vPaddingInches = Double(vMargins.top + vMargins.bottom) / Double(refDPI)
+        return Size2D(
+            width: max(0.5, contentBoxInches.width + hPaddingInches),
+            height: max(0.5, contentBoxInches.height + vPaddingInches)
+        )
+    }
+
+    private static func medianOfSorted(_ sorted: [Double]) -> Double? {
+        guard !sorted.isEmpty else { return nil }
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 1 {
+            return sorted[mid]
+        }
+        return 0.5 * (sorted[mid - 1] + sorted[mid])
+    }
+
+    private static func selectProbeIndices(from count: Int, maxProbes: Int) -> [Int] {
+        guard count > 0, maxProbes > 0 else { return [] }
+        if count <= maxProbes {
+            return Array(0..<count)
+        }
+        if count == 4 && maxProbes == 3 {
+            return [1, 2, 3]
+        }
+        let interior = count >= 5 ? Array(1..<(count - 1)) : Array(1..<count)
+        if interior.count <= maxProbes {
+            return interior
+        }
+        var selected: [Int] = []
+        selected.reserveCapacity(maxProbes)
+        for k in 0..<maxProbes {
+            let idx = Int((Double(k) * Double(interior.count - 1) / Double(max(1, maxProbes - 1))).rounded())
+            selected.append(interior[idx])
+        }
+        return selected
+    }
+
+    private static func selectEvenlySampledIndices(from count: Int, maxSamples: Int) -> Set<Int> {
+        guard count > 0, maxSamples > 0 else { return [] }
+        if count <= maxSamples {
+            return Set(0..<count)
+        }
+        var indices = Set<Int>()
+        indices.reserveCapacity(maxSamples)
+        for k in 0..<maxSamples {
+            let idx = Int((Double(k) * Double(count - 1) / Double(max(1, maxSamples - 1))).rounded())
+            indices.insert(idx)
+        }
+        return indices
+    }
+
+    private static func downsampleProbeBufferIfNeeded(
+        _ buffer: borrowing GrayscaleBuffer,
+        maxDimension: Int
+    ) -> (buffer: GrayscaleBuffer, scale: Double) {
+        var current = copy buffer
+        while max(current.width, current.height) > maxDimension && current.width >= 256 && current.height >= 256 {
+            let dstW = max(1, current.width / 2)
+            let dstH = max(1, current.height / 2)
+            let srcW = current.width
+            var dstPixels = ContiguousArray<UInt8>(repeating: 255, count: dstW * dstH)
+            current.pixels.withUnsafeBufferPointer { srcPtr in
+                dstPixels.withUnsafeMutableBufferPointer { dstPtr in
+                    for dy in 0..<dstH {
+                        let r0 = (dy * 2) * srcW
+                        let r1 = (dy * 2 + 1) * srcW
+                        let dstRow = dy * dstW
+                        for dx in 0..<dstW {
+                            let sx = dx * 2
+                            let sum = Int(srcPtr[r0 + sx]) + Int(srcPtr[r0 + sx + 1])
+                                + Int(srcPtr[r1 + sx]) + Int(srcPtr[r1 + sx + 1])
+                            dstPtr[dstRow + dx] = UInt8((sum + 2) >> 2)
+                        }
+                    }
+                }
+            }
+            current = GrayscaleBuffer(
+                width: dstW,
+                height: dstH,
+                dpi: max(1, current.dpi / 2),
+                pixels: dstPixels
+            )
+        }
+        let scale = Double(current.width) / Double(max(1, buffer.width))
+        return (current, scale)
+    }
+
+    private static func resampleOversizedGrayscalePages(
+        _ pages: [GrayscaleBuffer],
+        scaleCorrectionFactor: Double,
+        explicitOpticalDPI: Double? = nil,
+        targetProcessingDPI: Int,
+        accelerator: any ComputeAccelerator
+    ) -> [GrayscaleBuffer] {
+        var resampled: [GrayscaleBuffer] = []
+        resampled.reserveCapacity(pages.count)
+
+        for buf in pages {
+            let srcDPI = Double(max(1, buf.dpi))
+            let inferredOpticalDPI = explicitOpticalDPI ?? (srcDPI / max(1e-6, scaleCorrectionFactor))
+            let resampleRatio = Double(targetProcessingDPI) / max(1.0, inferredOpticalDPI)
+            let dstW = max(1, Int((Double(buf.width) * resampleRatio).rounded()))
+            let dstH = max(1, Int((Double(buf.height) * resampleRatio).rounded()))
+
+            if dstW == buf.width && dstH == buf.height {
+                resampled.append(
+                    GrayscaleBuffer(
+                        width: buf.width,
+                        height: buf.height,
+                        dpi: targetProcessingDPI,
+                        pixels: buf.pixels
+                    )
+                )
+                continue
+            }
+
+            let preFiltered: GrayscaleBuffer
+            if resampleRatio < 0.75 {
+                let sigma = min(8.0, 0.45 / max(1e-4, resampleRatio))
+                preFiltered = accelerator.gaussianBlur(buf, sigma: sigma)
+            } else {
+                preFiltered = buf
+            }
+
+            let sx = Double(dstW) / Double(buf.width)
+            let sy = Double(dstH) / Double(buf.height)
+            let warped = accelerator.affineWarp(
+                preFiltered,
+                transform: .scale(sx: sx, sy: sy),
+                outputSize: Size2I(width: dstW, height: dstH)
+            )
+            resampled.append(
+                GrayscaleBuffer(
+                    width: warped.width,
+                    height: warped.height,
+                    dpi: targetProcessingDPI,
+                    pixels: warped.pixels
+                )
+            )
+        }
+
+        return resampled
     }
 }

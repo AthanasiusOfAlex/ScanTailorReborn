@@ -71,6 +71,9 @@ public struct ScanTailorCLI {
         public var gutterTrimWidth: Int = 24
         public var autoPruneBlankPages: Bool = true
         public var margins: PublicationMargins = .publicationDefault
+        public var pageSize: PhysicalSizeSpec? = nil
+        public var contentBoxSize: PhysicalSizeSpec? = nil
+        public var inputDPI: Int? = nil
         public var pageRange: ClosedRange<Int>?
         public var excludedPages: Set<Int> = []
         public var firstPageSide: MarginHarmonizer.PageSide = .recto
@@ -120,6 +123,9 @@ public struct ScanTailorCLI {
         var gutterTrimWidth = 24
         var autoPruneBlankPages = true
         var margins: PublicationMargins = .publicationDefault
+        var pageSize: PhysicalSizeSpec? = nil
+        var contentBoxSize: PhysicalSizeSpec? = nil
+        var inputDPI: Int? = nil
         var pageRange: ClosedRange<Int>? = nil
         var excludedPages: Set<Int> = []
         var firstPageSide: MarginHarmonizer.PageSide = .recto
@@ -175,6 +181,27 @@ public struct ScanTailorCLI {
                     throw .invalidOptionValue(flag: arg, value: args[i + 1])
                 }
                 margins = parsed
+                i += 2
+            case "--page-size", "--trim-size":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let parsed = PhysicalSizeSpec.parse(args[i + 1]) else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                pageSize = parsed
+                i += 2
+            case "--content-box-size", "--content-size", "--text-box-size":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let parsed = PhysicalSizeSpec.parse(args[i + 1]) else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                contentBoxSize = parsed
+                i += 2
+            case "--input-dpi", "--source-dpi":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let val = Int(args[i + 1]), val >= 18, val <= 4800 else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                inputDPI = val
                 i += 2
             case "--page-range", "--pages":
                 guard i + 1 < args.count else { throw .missingValue(flag: arg) }
@@ -299,6 +326,9 @@ public struct ScanTailorCLI {
         opts.gutterTrimWidth = gutterTrimWidth
         opts.autoPruneBlankPages = autoPruneBlankPages
         opts.margins = margins
+        opts.pageSize = pageSize
+        opts.contentBoxSize = contentBoxSize
+        opts.inputDPI = inputDPI
         opts.pageRange = pageRange
         opts.excludedPages = excludedPages
         opts.firstPageSide = firstPageSide
@@ -384,10 +414,15 @@ public struct ScanTailorCLI {
             method: options.binarizationMethod,
             backgroundNormalization: BackgroundNormalizer.Configuration()
         )
-        let harmConfig = MarginHarmonizer.Configuration(margins: options.margins)
+        let harmConfig = MarginHarmonizer.Configuration(
+            margins: options.margins,
+            targetPageSize: options.pageSize,
+            targetContentBoxSize: options.contentBoxSize
+        )
         let pipeConfig = BookPipelineCoordinator.Configuration(
             processingDPI: 600,
             outputDPI: 300,
+            inputDPI: options.inputDPI,
             splitMode: options.splitMode,
             gutterTrimWidth: options.gutterTrimWidth,
             autoPruneBlankPages: options.autoPruneBlankPages,
@@ -416,6 +451,23 @@ public struct ScanTailorCLI {
             }
         } catch {
             throw CLIError.executionFailed("Pipeline failed: \(error)")
+        }
+
+        if result.manifest.physicalScaleAmbiguous {
+            let pageSizeInches = result.manifest.fontScaleEstimate?.estimatedSinglePageSizeInches
+                ?? Size2D(
+                    width: Double(result.manifest.canonicalCanvasSizeAtProcessingDPI.width) / Double(max(1, result.manifest.processingDPI)),
+                    height: Double(result.manifest.canonicalCanvasSizeAtProcessingDPI.height) / Double(max(1, result.manifest.processingDPI))
+                )
+            let trimW = String(format: "%.2f", pageSizeInches.width)
+            let trimH = String(format: "%.2f", pageSizeInches.height)
+            print("WARNING [physicalScaleAmbiguous=true]: Physical page scale could not be determined automatically with high confidence (estimated height > 14\"). Clamped output canvas to \(trimW)\" x \(trimH)\" to prevent billboard pages. Escalate to user and re-run with --page-size (e.g. octavo, trade-paperback, a5, a4, letter, or <w>x<h>) or --input-dpi.")
+        } else if let scaleEst = result.manifest.fontScaleEstimate, scaleEst.wasAutoRescaled {
+            let scaleStr = String(format: "%.3fx", scaleEst.appliedScaleCorrectionFactor)
+            let optDPIStr = String(format: "%.0f", scaleEst.inferredSourceOpticalDPI)
+            let trimW = String(format: "%.2f", scaleEst.estimatedSinglePageSizeInches.width)
+            let trimH = String(format: "%.2f", scaleEst.estimatedSinglePageSizeInches.height)
+            print("Auto-rescaled uncalibrated source (\(scaleStr), inferred ~\(optDPIStr) optical DPI -> \(trimW)\" x \(trimH)\" canonical page)")
         }
 
         // Determine where to save the JSON manifest
@@ -493,6 +545,49 @@ public struct ScanTailorCLI {
             let langs = manifest.ocrLanguages?.joined(separator: ", ") ?? "default"
             lines.append("OCR Engine: \(engine) | Languages: [\(langs)]")
         }
+        var overrideParts: [String] = []
+        if let inputDPI = manifest.inputDPI {
+            overrideParts.append("inputDPI=\(inputDPI)")
+        }
+        if let pageSize = manifest.pageSize {
+            overrideParts.append("pageSize=\(pageSize.description)")
+        }
+        if let contentBoxSize = manifest.contentBoxSize {
+            overrideParts.append("contentBoxSize=\(contentBoxSize.description)")
+        }
+        if !overrideParts.isEmpty {
+            lines.append("Dimension Overrides: \(overrideParts.joined(separator: " | "))")
+        }
+        if manifest.physicalScaleAmbiguous {
+            lines.append("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true) — escalate to user for --page-size (octavo, trade-paperback, a5, a4, letter) or --input-dpi")
+        }
+        if let scale = manifest.fontScaleEstimate {
+            let modeStr: String
+            if scale.wasAntiBillboardClamped {
+                modeStr = String(
+                    format: "anti-billboard clamped %.3fx",
+                    scale.appliedScaleCorrectionFactor
+                )
+            } else if scale.wasAutoRescaled {
+                modeStr = String(
+                    format: "auto-rescaled %.3fx (inferred %.0f DPI)",
+                    scale.appliedScaleCorrectionFactor,
+                    scale.inferredSourceOpticalDPI
+                )
+            } else {
+                modeStr = "calibrated 1.000x"
+            }
+            let xH = String(format: "%.1f", scale.medianXHeightPixels)
+            let capH = String(format: "%.1f", scale.medianCapHeightPixels)
+            let strokeW = String(format: "%.1f", scale.medianStrokeWidthPixels)
+            let bodyPt = String(format: "%.1f", scale.estimatedBodyPointSize)
+            let pageIn = String(
+                format: "%.2f\" x %.2f\"",
+                scale.estimatedSinglePageSizeInches.width,
+                scale.estimatedSinglePageSizeInches.height
+            )
+            lines.append("Typography & Scale: \(modeStr) | body≈\(bodyPt)pt (x=\(xH)px, cap=\(capH)px, stroke=\(strokeW)px @ \(scale.processingDPI) DPI) | page=\(pageIn)")
+        }
         lines.append("Total Output Pages: \(manifest.pages.count) (from \(manifest.sourcePageSplits.count) source scan(s))")
         if !manifest.prunedPages.isEmpty {
             lines.append("Pruned Blank Sub-Pages: \(manifest.prunedPages.count)")
@@ -524,7 +619,11 @@ public struct ScanTailorCLI {
       --split-mode <mode>          Spread split mode: automatic (default), single, spread
       --gutter-trim-width <px>     Central gutter strip trimming width in px at 600 DPI (default: 24)
       --margins <spec>             Publication margins, e.g. "top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"
-                                   (supports in, pt, mm, px; inner/gutter, outer)
+                                   (supports in, pt, mm, cm, px; inner/gutter, outer)
+      --page-size <spec>           Target output page trim size: preset (octavo, trade-paperback, royal-octavo,
+                                   crown-octavo, a5, a4, b5, letter) or <w>x<h> (e.g. 6x9in, 5.5x8.5in, 148x210mm)
+      --content-box-size <w>x<h>   Explicit canonical text block dimensions (e.g. 4.5x7.5in, 114x190mm)
+      --input-dpi <dpi>            Explicit genuine source optical DPI (overrides 72/96-DPI wrapper metadata)
       --page-range <range>         1-based source scan range (e.g. 1-10, 5..20)
       --exclude-pages <list>       Comma-separated 1-based source scan indices to skip (e.g. 1,2,5)
       --first-page-side <side>     Initial logical book side: recto (default) or verso

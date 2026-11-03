@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ScanTailorReborn}",
+            "name": "Debug scantailor-cli",
+            "target": "scantailor-cli",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug scantailor-cli"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ScanTailorReborn}",
+            "name": "Release scantailor-cli",
+            "target": "scantailor-cli",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release scantailor-cli"
+        }
+    ]
+}
