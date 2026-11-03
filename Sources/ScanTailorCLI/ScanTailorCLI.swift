@@ -79,6 +79,7 @@ public struct ScanTailorCLI {
         public var firstPageSide: MarginHarmonizer.PageSide = .recto
         public var enableDewarp: Bool = true
         public var enablePerspectiveRectification: Bool = true
+        public var enableDeskMasking: Bool = true
         public var enableOCR: Bool = true
         public var ocrEngineType: OCREngineType? = nil
         public var ocrLanguages: [String] = ["en-US"]
@@ -132,6 +133,7 @@ public struct ScanTailorCLI {
         var firstPageSide: MarginHarmonizer.PageSide = .recto
         var enableDewarp = true
         var enablePerspective = true
+        var enableDeskMask = true
         var enableOCR = true
         var ocrEngineType: OCREngineType? = nil
         var ocrLanguages: [String] = ["en-US"]
@@ -290,6 +292,9 @@ public struct ScanTailorCLI {
             case "--no-perspective", "--no-quad":
                 enablePerspective = false
                 i += 1
+            case "--no-desk-mask":
+                enableDeskMask = false
+                i += 1
             case "--no-auto-prune", "--no-blank-pruning":
                 autoPruneBlankPages = false
                 i += 1
@@ -339,6 +344,7 @@ public struct ScanTailorCLI {
         opts.firstPageSide = firstPageSide
         opts.enableDewarp = enableDewarp
         opts.enablePerspectiveRectification = enablePerspective
+        opts.enableDeskMasking = enableDeskMask
         opts.enableOCR = enableOCR
         opts.ocrEngineType = ocrEngineType
         opts.ocrLanguages = ocrLanguages
@@ -439,7 +445,8 @@ public struct ScanTailorCLI {
             pageRange: options.pageRange,
             excludedPages: options.excludedPages,
             ocrLanguages: options.ocrLanguages,
-            enablePerspectiveRectification: options.enablePerspectiveRectification
+            enablePerspectiveRectification: options.enablePerspectiveRectification,
+            enableDeskMasking: options.enableDeskMasking
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -571,6 +578,14 @@ public struct ScanTailorCLI {
             let rejected = manifest.sourcePageGeometry.filter { $0.detection?.outcome == .rejected }.count
             let manual = manifest.sourcePageGeometry.filter { $0.manualOverride != nil }.count
             lines.append("Perspective Rectification: \(rectified) rectified | \(fullFrame) full-frame | \(rejected) rejected | \(manual) manual override(s)")
+            let maskRecords = manifest.sourcePageGeometry.compactMap(\.deskMask)
+            let masked = maskRecords.filter { $0.mode != .skipped }.count
+            let skipped = maskRecords.filter { $0.mode == .skipped }.count
+            let capped = maskRecords.filter { $0.flags.contains(where: { $0.hasPrefix("capped:") }) }.count
+            let meanMaskedPercent = masked > 0
+                ? maskRecords.filter { $0.mode != .skipped }.map(\.maskedFraction).reduce(0, +) / Double(masked) * 100
+                : 0
+            lines.append("Desk Masking: \(masked) masked (mean \(String(format: "%.1f", meanMaskedPercent))%) | \(skipped) skipped | \(capped) capped")
         }
         if manifest.physicalScaleAmbiguous {
             lines.append("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true) — escalate to user for --page-size (octavo, trade-paperback, a5, a4, letter) or --input-dpi")
@@ -645,6 +660,7 @@ public struct ScanTailorCLI {
       --no-auto-prune              Disable automatic pruning of blank sub-page slices
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping
       --no-perspective             Disable document-quad detection and perspective rectification (alias --no-quad)
+      --no-desk-mask               Disable residual desk/background masking before binarization
       --no-ocr                     Disable OCR searchable text layer
       --ocr-engine <engine>        OCR engine: apple (default on macOS), tesseract, dual
       --ocr-languages <langs>      Comma or plus-separated language codes, e.g. "grc+lat", "en-US,de-DE", "frk"

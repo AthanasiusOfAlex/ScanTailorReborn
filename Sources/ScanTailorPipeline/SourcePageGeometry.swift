@@ -13,10 +13,24 @@ public struct SourcePageGeometryOverride: Sendable, Equatable, Codable {
     public var overrideQuad: DocumentQuad?
     /// When `true`, the page is passed through without perspective rectification.
     public var disableRectification: Bool?
+    /// When `true`, the page is passed through without desk/background masking.
+    public var disableDeskMask: Bool?
 
-    public init(overrideQuad: DocumentQuad? = nil, disableRectification: Bool? = nil) {
+    public init(overrideQuad: DocumentQuad? = nil, disableRectification: Bool? = nil, disableDeskMask: Bool? = nil) {
         self.overrideQuad = overrideQuad
         self.disableRectification = disableRectification
+        self.disableDeskMask = disableDeskMask
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case overrideQuad, disableRectification, disableDeskMask
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.overrideQuad = try c.decodeIfPresent(DocumentQuad.self, forKey: .overrideQuad)
+        self.disableRectification = try c.decodeIfPresent(Bool.self, forKey: .disableRectification)
+        self.disableDeskMask = try c.decodeIfPresent(Bool.self, forKey: .disableDeskMask)
     }
 }
 
@@ -32,6 +46,8 @@ public struct SourcePageGeometryRecord: Sendable, Equatable, Codable {
     public var rectified: Bool
     /// Rectification geometry (quad, aspect, output size, homographies) when ``rectified``.
     public var plan: RectificationPlan?
+    /// Desk/background masking telemetry for this page (`nil` only for manifests predating 5.2.1).
+    public var deskMask: DeskMaskResult?
     /// Optional user override carried forward from the input manifest.
     public var manualOverride: SourcePageGeometryOverride?
 
@@ -41,6 +57,7 @@ public struct SourcePageGeometryRecord: Sendable, Equatable, Codable {
         detection: DocumentQuadDetection?,
         rectified: Bool,
         plan: RectificationPlan?,
+        deskMask: DeskMaskResult? = nil,
         manualOverride: SourcePageGeometryOverride? = nil
     ) {
         self.sourcePageIndex = sourcePageIndex
@@ -48,7 +65,23 @@ public struct SourcePageGeometryRecord: Sendable, Equatable, Codable {
         self.detection = detection
         self.rectified = rectified
         self.plan = plan
+        self.deskMask = deskMask
         self.manualOverride = manualOverride
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sourcePageIndex, rasterSize, detection, rectified, plan, deskMask, manualOverride
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.sourcePageIndex = try c.decode(Int.self, forKey: .sourcePageIndex)
+        self.rasterSize = try c.decode(Size2I.self, forKey: .rasterSize)
+        self.detection = try c.decodeIfPresent(DocumentQuadDetection.self, forKey: .detection)
+        self.rectified = try c.decode(Bool.self, forKey: .rectified)
+        self.plan = try c.decodeIfPresent(RectificationPlan.self, forKey: .plan)
+        self.deskMask = try c.decodeIfPresent(DeskMaskResult.self, forKey: .deskMask)
+        self.manualOverride = try c.decodeIfPresent(SourcePageGeometryOverride.self, forKey: .manualOverride)
     }
 }
 
@@ -122,5 +155,23 @@ extension BookPipelineCoordinator {
             plan: plan,
             manualOverride: manualOverride
         ))
+    }
+
+    /// Masks the desk/background of a source page (normally already perspective-rectified),
+    /// filling it with a paper-toned estimate, and records the telemetry on `record`.
+    ///
+    /// No-ops (leaving ``SourcePageGeometryRecord/deskMask`` `nil`) when masking is disabled
+    /// globally or via `record.manualOverride?.disableDeskMask`.
+    func maskDeskOfSourcePage(
+        _ page: GrayscaleBuffer,
+        record: SourcePageGeometryRecord
+    ) -> (page: GrayscaleBuffer, record: SourcePageGeometryRecord) {
+        guard configuration.enableDeskMasking, record.manualOverride?.disableDeskMask != true else {
+            return (page, record)
+        }
+        let (maskedPage, result) = PaperRegionMasker.mask(page, configuration: configuration.deskMaskerConfiguration)
+        var updated = record
+        updated.deskMask = result
+        return (maskedPage, updated)
     }
 }

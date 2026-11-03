@@ -233,9 +233,9 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
 
 /// Coordinates the 3-pass automated book processing pipeline:
 /// - **Pass 1**: Source rasterization (600 DPI), document quadrangle detection and perspective
-///   rectification (desk excision), dual-page spread splitting, multi-scale deskew,
-///   3D cubic-sheet dewarping (with flat-page auto-bypass), illumination normalization, adaptive
-///   binarization, border/speckle cleanup, and initial content box detection.
+///   rectification (desk excision), residual desk/background masking, dual-page spread splitting,
+///   multi-scale deskew, 3D cubic-sheet dewarping (with flat-page auto-bypass), illumination
+///   normalization, adaptive binarization, border/speckle cleanup, and initial content box detection.
 /// - **Pass 2**: Book-wide statistical outlier rejection and 3-tier margin harmonization
 ///   (`fullBody`, `edgeAnchoredPartial`, and `standaloneFloating`).
 /// - **Pass 3**: Canonical canvas rendering, 600 $\rightarrow$ 300 DPI area-thresholded downsampling,
@@ -300,6 +300,12 @@ public struct BookPipelineCoordinator: Sendable {
         public var quadDetectorConfiguration: DocumentQuadDetector.Configuration
         /// Perspective rectifier configuration.
         public var rectifierConfiguration: PerspectiveRectifier.Configuration
+        /// Whether to mask residual desk/background pixels before illumination normalization and
+        /// binarization (default: `true`). Runs after perspective rectification, on every source
+        /// page (including unrectified ones).
+        public var enableDeskMasking: Bool
+        /// Desk/background masker configuration.
+        public var deskMaskerConfiguration: PaperRegionMasker.Configuration
 
         public init(
             processingDPI: Int = 600,
@@ -329,7 +335,9 @@ public struct BookPipelineCoordinator: Sendable {
             fontScaleConfiguration: FontScaleAnalyzer.Configuration = FontScaleAnalyzer.Configuration(),
             enablePerspectiveRectification: Bool = true,
             quadDetectorConfiguration: DocumentQuadDetector.Configuration = DocumentQuadDetector.Configuration(),
-            rectifierConfiguration: PerspectiveRectifier.Configuration = PerspectiveRectifier.Configuration()
+            rectifierConfiguration: PerspectiveRectifier.Configuration = PerspectiveRectifier.Configuration(),
+            enableDeskMasking: Bool = true,
+            deskMaskerConfiguration: PaperRegionMasker.Configuration = PaperRegionMasker.Configuration()
         ) {
             self.processingDPI = max(150, processingDPI)
             self.outputDPI = max(72, outputDPI)
@@ -361,6 +369,8 @@ public struct BookPipelineCoordinator: Sendable {
             self.enablePerspectiveRectification = enablePerspectiveRectification
             self.quadDetectorConfiguration = quadDetectorConfiguration
             self.rectifierConfiguration = rectifierConfiguration
+            self.enableDeskMasking = enableDeskMasking
+            self.deskMaskerConfiguration = deskMaskerConfiguration
         }
     }
 
@@ -1011,7 +1021,7 @@ public struct BookPipelineCoordinator: Sendable {
             }
         }
 
-        // --- PASS 1: Perspective Rectification, Page Split, Deskew, 3D Cubic-Sheet Dewarp, 600 DPI Binarization & Content Box Detection ---
+        // --- PASS 1: Perspective Rectification, Desk Masking, Page Split, Deskew, 3D Cubic-Sheet Dewarp, 600 DPI Binarization & Content Box Detection ---
         var sourceSplits: [PageSplitDecision] = []
         sourceSplits.reserveCapacity(sourcePages.count)
         var pass1Pages: [Pass1Page] = []
@@ -1028,13 +1038,16 @@ public struct BookPipelineCoordinator: Sendable {
         let effectiveGutterTrimWidth = max(0, Int((Double(configuration.gutterTrimWidth) * dpiScale).rounded()))
 
         for (srcIdx, unrectifiedScan) in sourcePages.enumerated() {
-            // 0. Document quadrangle detection & perspective rectification (desk excision).
-            let (rawScan, geometryRecord) = rectifySourcePage(
+            // 0a. Document quadrangle detection & perspective rectification (desk excision).
+            let (rectifiedScan, rectificationRecord) = rectifySourcePage(
                 unrectifiedScan,
                 sourcePageIndex: srcIdx,
                 priorRecord: priorGeometryBySourceIndex[srcIdx],
                 targetPageSize: effectivePageSize
             )
+            // 0b. Residual desk/background masking (gutter wedges, crop-edge slivers, or the full
+            // desk when rectification was skipped, rejected, or disabled).
+            let (rawScan, geometryRecord) = maskDeskOfSourcePage(rectifiedScan, record: rectificationRecord)
             sourceGeometry.append(geometryRecord)
 
             let splitDecision = PageSplitEstimator.estimateSplit(
