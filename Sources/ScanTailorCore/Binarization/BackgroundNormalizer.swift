@@ -15,14 +15,16 @@ import ScanTailorContracts
 ///    closing to bridge across dark ink strokes without eroding glyph interiors, and smooths via
 ///    `ComputeAccelerator.gaussianBlur`.
 /// 3. **Pass 2 — Foreground-Masked Residual Quotient Flattening**: Evaluates the unclipped Pass 1
-///    quotient to segment pure exposed paper pixels from foreground ink and stroke halos, inpaints
-///    ink-covered regions via multi-stride normalized diffusion, and smooths the pure-paper residual
-///    surface so dense multi-column text never depresses the background estimate and steep boundary
-///    spine shadows flatten cleanly right to the page edge.
+///    quotient against a mode-seeking per-block paper crest to segment pure exposed paper pixels from
+///    foreground ink, rejects soft optical-PSF stroke skirts that border ink, inpaints ink-covered regions
+///    via multi-stride normalized diffusion, and smooths the pure-paper residual surface with point-reflected
+///    (linear-ramp-preserving) boundaries, so dense multi-column text never depresses the background
+///    estimate and steep boundary spine shadows flatten cleanly right to the page edge.
 /// 4. **Anti-Starvation Ink Contrast Harmonization**: Measures the macro low-frequency stroke-core
-///    absorption envelope across text cells and applies a $C^1$-continuous noise-gated contrast gain
-///    to glare-veiled or compressed-contrast regions while leaving paper grain and faint bleed-through
-///    completely untouched.
+///    absorption envelope across paper-supported text cells (rejecting desk/border outliers) and restores
+///    glare-veiled absorption multiplicatively toward the crisp reference, gated by local peak absorption
+///    so stroke-edge pixels inherit their stroke's gain (uniform stroke weight) while isolated paper grain
+///    and faint bleed-through stay untouched.
 /// 5. **Sub-Gray-Level Quotient Reconstruction**: Applies `min(255, (src * 255) / max(bgEff, floor))`
 ///    in fixed-point sub-gray-level precision with optional `strength` blending.
 public struct BackgroundNormalizer: Sendable {
@@ -595,113 +597,71 @@ public struct BackgroundNormalizer: Sendable {
 
         let targetW = source.width
         let targetH = source.height
-        let srcW = resolved.gridWidth
-        let srcH = resolved.gridHeight
+        let gridW = resolved.gridWidth
         let minDivisorQ6 = Int(max(1, configuration.minimumBackgroundDivisor)) << 6
         let blendMilli = Int((configuration.strength * 1024.0).rounded())
 
         var outPixels = ContiguousArray<UInt8>(repeating: 255, count: targetW * targetH)
-        let scaleY = Double(srcH) / Double(max(1, targetH))
-        let xLUT = Self.makeBilinearAxisLUT(srcLength: srcW, targetLength: targetW)
+        let xLUT = Self.makeBilinearAxisLUT(srcLength: gridW, targetLength: targetW)
+        let yLUT = Self.makeBilinearAxisLUT(srcLength: resolved.gridHeight, targetLength: targetH)
 
+        // Pass A: Unblended sub-gray-level background quotient `min(255, src * 255 / bgEff)`.
         source.pixels.withUnsafeBufferPointer { srcPtr in
             resolved.backgroundSmallQ6.withUnsafeBufferPointer { bgSmallPtr in
                 xLUT.i0.withUnsafeBufferPointer { x0Ptr in
                     xLUT.i1.withUnsafeBufferPointer { x1Ptr in
                         xLUT.frac.withUnsafeBufferPointer { fxPtr in
                             outPixels.withUnsafeMutableBufferPointer { dstPtr in
-                                if let gainSmallQ8 = resolved.contrastGainSmallQ8 {
-                                    gainSmallQ8.withUnsafeBufferPointer { gainSmallPtr in
-                                        for y in 0..<targetH {
-                                            let srcY = max(0.0, min(Double(srcH - 1), (Double(y) + 0.5) * scaleY - 0.5))
-                                            let y0 = Int(srcY)
-                                            let y1 = min(srcH - 1, y0 + 1)
-                                            let fy = Int(((srcY - Double(y0)) * 256.0).rounded())
-                                            let invFy = 256 - fy
+                                for y in 0..<targetH {
+                                    let row0 = yLUT.i0[y] * gridW
+                                    let row1 = yLUT.i1[y] * gridW
+                                    let fy = yLUT.frac[y]
+                                    let invFy = 256 - fy
+                                    let dstRow = y * targetW
 
-                                            let row0 = y0 * srcW
-                                            let row1 = y1 * srcW
-                                            let dstRow = y * targetW
+                                    for x in 0..<targetW {
+                                        let x0 = x0Ptr[x]
+                                        let x1 = x1Ptr[x]
+                                        let fx = fxPtr[x]
+                                        let invFx = 256 - fx
 
-                                            for x in 0..<targetW {
-                                                let x0 = x0Ptr[x]
-                                                let x1 = x1Ptr[x]
-                                                let fx = fxPtr[x]
-                                                let invFx = 256 - fx
+                                        let bTop = bgSmallPtr[row0 + x0] * invFx + bgSmallPtr[row0 + x1] * fx
+                                        let bBot = bgSmallPtr[row1 + x0] * invFx + bgSmallPtr[row1 + x1] * fx
+                                        let bgQ6 = max((bTop * invFy + bBot * fy + 32768) >> 16, minDivisorQ6)
 
-                                                let bTop = bgSmallPtr[row0 + x0] * invFx + bgSmallPtr[row0 + x1] * fx
-                                                let bBot = bgSmallPtr[row1 + x0] * invFx + bgSmallPtr[row1 + x1] * fx
-                                                let bgQ6 = max((bTop * invFy + bBot * fy + 32768) >> 16, minDivisorQ6)
-
-                                                let s = Int(srcPtr[dstRow + x])
-                                                // 16320 == 255 * 64 (matches Q6 background fixed-point scaling)
-                                                var normalized = min(255, (s * 16320 + (bgQ6 >> 1)) / bgQ6)
-
-                                                let absorption = 255 - normalized
-                                                if absorption > 16 {
-                                                    let gTop = gainSmallPtr[row0 + x0] * invFx + gainSmallPtr[row0 + x1] * fx
-                                                    let gBot = gainSmallPtr[row1 + x0] * invFx + gainSmallPtr[row1 + x1] * fx
-                                                    let gainQ8 = (gTop * invFy + gBot * fy + 32768) >> 16
-                                                    if gainQ8 > 256 {
-                                                        let excess = absorption - 16
-                                                        let extraGainQ8 = gainQ8 - 256
-                                                        // C^1-smooth quadratic ramp across excess in 1...24 (absorption 17...40),
-                                                        // transitioning to exact linear boost above absorption 40:
-                                                        let boost: Int
-                                                        if excess < 24 {
-                                                            boost = (extraGainQ8 * excess * excess + 3072) / 6144
-                                                        } else {
-                                                            boost = (extraGainQ8 * excess + 128) >> 8
-                                                        }
-                                                        normalized = max(0, 255 - (absorption + boost))
-                                                    }
-                                                }
-
-                                                if blendMilli >= 1024 {
-                                                    dstPtr[dstRow + x] = UInt8(normalized)
-                                                } else {
-                                                    let blended = ((1024 - blendMilli) * s + blendMilli * normalized + 512) >> 10
-                                                    dstPtr[dstRow + x] = UInt8(min(255, max(0, blended)))
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    for y in 0..<targetH {
-                                        let srcY = max(0.0, min(Double(srcH - 1), (Double(y) + 0.5) * scaleY - 0.5))
-                                        let y0 = Int(srcY)
-                                        let y1 = min(srcH - 1, y0 + 1)
-                                        let fy = Int(((srcY - Double(y0)) * 256.0).rounded())
-                                        let invFy = 256 - fy
-
-                                        let row0 = y0 * srcW
-                                        let row1 = y1 * srcW
-                                        let dstRow = y * targetW
-
-                                        for x in 0..<targetW {
-                                            let x0 = x0Ptr[x]
-                                            let x1 = x1Ptr[x]
-                                            let fx = fxPtr[x]
-                                            let invFx = 256 - fx
-
-                                            let bTop = bgSmallPtr[row0 + x0] * invFx + bgSmallPtr[row0 + x1] * fx
-                                            let bBot = bgSmallPtr[row1 + x0] * invFx + bgSmallPtr[row1 + x1] * fx
-                                            let bgQ6 = max((bTop * invFy + bBot * fy + 32768) >> 16, minDivisorQ6)
-
-                                            let s = Int(srcPtr[dstRow + x])
-                                            let normalized = min(255, (s * 16320 + (bgQ6 >> 1)) / bgQ6)
-
-                                            if blendMilli >= 1024 {
-                                                dstPtr[dstRow + x] = UInt8(normalized)
-                                            } else {
-                                                let blended = ((1024 - blendMilli) * s + blendMilli * normalized + 512) >> 10
-                                                dstPtr[dstRow + x] = UInt8(min(255, max(0, blended)))
-                                            }
-                                        }
+                                        // 16320 == 255 * 64 (matches Q6 background fixed-point scaling)
+                                        let s = Int(srcPtr[dstRow + x])
+                                        dstPtr[dstRow + x] = UInt8(min(255, (s * 16320 + (bgQ6 >> 1)) / bgQ6))
                                     }
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Pass B: Anti-starvation contrast leveling (multiplicative absorption gain, ink-anchored gate).
+        if let gainSmallQ8 = resolved.contrastGainSmallQ8 {
+            Self.applyContrastLeveling(
+                to: &outPixels,
+                width: targetW,
+                height: targetH,
+                gainSmallQ8: gainSmallQ8,
+                gridWidth: gridW,
+                xLUT: xLUT,
+                yLUT: yLUT
+            )
+        }
+
+        // Pass C: Optional `strength` blend between the original and fully normalized image.
+        if blendMilli < 1024 {
+            source.pixels.withUnsafeBufferPointer { srcPtr in
+                outPixels.withUnsafeMutableBufferPointer { dstPtr in
+                    for i in 0..<(targetW * targetH) {
+                        let s = Int(srcPtr[i])
+                        let blended = ((1024 - blendMilli) * s + blendMilli * Int(dstPtr[i]) + 512) >> 10
+                        dstPtr[i] = UInt8(min(255, max(0, blended)))
                     }
                 }
             }
@@ -858,7 +818,10 @@ public struct BackgroundNormalizer: Sendable {
             }
         }
 
-        // Step 2a: Compute spike-immune per-block upper-half mean of unclipped Pass 1 quotient Q_1.
+        // Step 2a: Compute a spike-immune, mode-seeking per-block crest of unclipped Pass 1 quotient Q_1:
+        // two successive trimmed upper means (`q1 >= 15/16 * current`) re-centre on the bright paper mode,
+        // so soft optical-PSF stroke skirts in dense text cannot drag the crest (and paper gate) down,
+        // while a lone sharpening spike is still diluted by the surrounding paper pixels.
         var upperQ1 = ContiguousArray<UInt16>(repeating: 255, count: cellCount)
         q1Full.withUnsafeBufferPointer { q1Ptr in
             upperQ1.withUnsafeMutableBufferPointer { upPtr in
@@ -882,20 +845,25 @@ public struct BackgroundNormalizer: Sendable {
                         let meanQ1 = sumQ1 / area
 
                         if area >= 4 {
-                            let cut = (meanQ1 * 15) >> 4
-                            var upSum = 0
-                            var upCnt = 0
-                            for sy in y0..<y1 {
-                                let rowOff = sy * srcW
-                                for sx in x0..<x1 {
-                                    let q1 = Int(q1Ptr[rowOff + sx])
-                                    if q1 >= cut {
-                                        upSum += q1
-                                        upCnt += 1
+                            var crest = meanQ1
+                            for _ in 0..<2 {
+                                let cut = (crest * 15) >> 4
+                                var upSum = 0
+                                var upCnt = 0
+                                for sy in y0..<y1 {
+                                    let rowOff = sy * srcW
+                                    for sx in x0..<x1 {
+                                        let q1 = Int(q1Ptr[rowOff + sx])
+                                        if q1 >= cut {
+                                            upSum += q1
+                                            upCnt += 1
+                                        }
                                     }
                                 }
+                                guard upCnt > 0 else { break }
+                                crest = upSum / upCnt
                             }
-                            upPtr[cellRow + dx] = UInt16(upCnt > 0 ? (upSum / upCnt) : meanQ1)
+                            upPtr[cellRow + dx] = UInt16(crest)
                         } else {
                             upPtr[cellRow + dx] = UInt16(meanQ1)
                         }
@@ -947,6 +915,11 @@ public struct BackgroundNormalizer: Sendable {
                                     let crest = Int(crestPtr[cellIdx])
                                     let paperMinQ1 = max(96, (crest * 88) / 100)
                                     let fgMaxQ1 = (crest * 78) / 100
+                                    // Candidates in the soft skirt band [paperMinQ1, skirtBandQ1) are only
+                                    // trusted as paper when no foreground pixel touches them: faint optical
+                                    // PSF skirts of veiled strokes sit here and would bias B_2 low, whereas
+                                    // smooth illumination ramps (spine, vignette) have no adjacent ink.
+                                    let skirtBandQ1 = (crest * 96) / 100
                                     let minPaperPixels = max(1, area / 12)
                                     let minFgPixels = max(1, area / 16)
 
@@ -962,6 +935,16 @@ public struct BackgroundNormalizer: Sendable {
                                             let q1 = Int(q1Ptr[rowOff + sx])
 
                                             if s >= rawPaperFloor && q1 >= paperMinQ1 {
+                                                if q1 < skirtBandQ1 && Self.touchesForeground(
+                                                    q1Ptr,
+                                                    x: sx,
+                                                    y: sy,
+                                                    width: srcW,
+                                                    height: srcH,
+                                                    foregroundMaxQ1: fgMaxQ1
+                                                ) {
+                                                    continue
+                                                }
                                                 paperSum += q1
                                                 paperCnt += 1
                                             } else if wantContrast && q1 <= fgMaxQ1 {
@@ -1008,13 +991,16 @@ public struct BackgroundNormalizer: Sendable {
             ? max(1.25, baseParams.downsampledBlurSigma * configuration.secondPassBlurSigmaScale)
             : 0.0
 
+        // Point-reflected boundaries keep B_2 unbiased on steep edge ramps (book-spine shadows,
+        // vignette fall-off) instead of dragging the interior paper ratio into the boundary cells.
         let b2Small = Self.inpaintAndSmoothNormalized2D(
             values: rawB2,
             weights: paperWeight,
             width: w1,
             height: h1,
             sigma: sigma2,
-            fallbackValue: 255.0
+            fallbackValue: 255.0,
+            boundary: .linearExtrapolate
         )
 
         var bgSmallQ6 = ContiguousArray<Int>(repeating: 16320, count: cellCount)
@@ -1040,40 +1026,46 @@ public struct BackgroundNormalizer: Sendable {
             var absHist = [Int](repeating: 0, count: 256)
             var validInkCells = 0
 
-            for i in 0..<cellCount where fgHasInk[i] {
+            // Ink absorption is only trusted where it was measured against paper exposed in the same
+            // cell, so dark desk strips, black scanner borders and photo plates (no paper samples) never
+            // masquerade as crisp text and inflate the glare envelope of neighbouring veiled text.
+            var inkBins = ContiguousArray<Int>(repeating: -1, count: cellCount)
+            for i in 0..<cellCount where fgHasInk[i] && paperWeight[i] > 0.0 {
                 let q2Ink = min(255.0, max(0.0, (fgCoreQ1[i] * 255.0) / max(1.0, b2Small[i])))
                 let absVal = 255.0 - q2Ink
                 if absVal >= 36.0 {
                     inkAbsValues[i] = absVal
                     inkAbsWeights[i] = 1.0
                     let bin = min(255, max(0, Int(absVal.rounded())))
+                    inkBins[i] = bin
                     absHist[bin] += 1
                     validInkCells += 1
                 }
             }
 
+            // Reject non-text absorption outliers (e.g. desk/paper boundary cells) lying far beyond the
+            // crisp text mode before measuring the envelope reference percentiles.
             let minRequiredInkCells = max(4, cellCount / 250)
             if validInkCells >= minRequiredInkCells {
-                let rank10 = max(1, (validInkCells * 10) / 100)
-                let rank80 = max(1, (validInkCells * 80) / 100)
-                var cum = 0
-                var p10Abs: Float = 0.0
-                var p80Abs: Float = 0.0
-                var found10 = false
-
-                for bin in 0..<256 {
-                    cum += absHist[bin]
-                    if !found10 && cum >= rank10 {
-                        p10Abs = Float(bin)
-                        found10 = true
+                let outlierBin = Self.histogramPercentile(absHist, total: validInkCells, percent: 90) + 40
+                if outlierBin < 255 {
+                    for bin in (outlierBin + 1)..<256 {
+                        validInkCells -= absHist[bin]
+                        absHist[bin] = 0
                     }
-                    if cum >= rank80 {
-                        p80Abs = Float(bin)
-                        break
+                    for i in 0..<cellCount where inkBins[i] > outlierBin {
+                        inkAbsValues[i] = 0.0
+                        inkAbsWeights[i] = 0.0
                     }
                 }
+            }
 
-                let targetAbs = min(Float(175.0), max(Float(145.0), p80Abs))
+            if validInkCells >= minRequiredInkCells {
+                // Crisp reference: the 90th-percentile ink-core absorption (upper shoulder of the crisp
+                // mode), so veiled strokes are lifted to the crisp stroke darkness rather than below it.
+                let p10Abs = Float(Self.histogramPercentile(absHist, total: validInkCells, percent: 10))
+                let p90Abs = Float(Self.histogramPercentile(absHist, total: validInkCells, percent: 90))
+                let targetAbs = min(Float(175.0), max(Float(145.0), p90Abs))
                 if p10Abs < targetAbs - 6.0 {
                     let glareSigma = max(6.0, 0.10 * Double(min(w1, h1)))
                     let smoothedAbs = Self.inpaintAndSmoothNormalized2D(
@@ -1090,10 +1082,12 @@ public struct BackgroundNormalizer: Sendable {
                     var maxGainQ8Observed = 256
 
                     for i in 0..<cellCount {
+                        // Veiling glare compresses absorption multiplicatively, so the gain that restores
+                        // the veiled core envelope to the crisp reference is the plain ratio target / env.
                         let env = max(Float(28.0), smoothedAbs[i])
                         let rawGain: Float
                         if env + 2.0 < targetAbs {
-                            rawGain = (targetAbs - 16.0) / max(Float(12.0), env - 16.0)
+                            rawGain = targetAbs / env
                         } else {
                             rawGain = 1.0
                         }
@@ -1488,6 +1482,148 @@ public struct BackgroundNormalizer: Sendable {
         let frac: ContiguousArray<Int>
     }
 
+    /// Returns `true` when any pixel in the `3 x 3` neighbourhood of `(x, y)` has an unclipped
+    /// Pass 1 quotient at or below `foregroundMaxQ1` (i.e. the pixel borders an ink stroke).
+    @inline(__always)
+    private static func touchesForeground(
+        _ q1: UnsafeBufferPointer<UInt16>,
+        x: Int,
+        y: Int,
+        width w: Int,
+        height h: Int,
+        foregroundMaxQ1: Int
+    ) -> Bool {
+        let yLo = max(0, y - 1)
+        let yHi = min(h - 1, y + 1)
+        let xLo = max(0, x - 1)
+        let xHi = min(w - 1, x + 1)
+        for ny in yLo...yHi {
+            let row = ny * w
+            for nx in xLo...xHi where Int(q1[row + nx]) <= foregroundMaxQ1 {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Returns the smallest histogram bin whose cumulative count reaches `percent`% of `total`.
+    private static func histogramPercentile(_ hist: [Int], total: Int, percent: Int) -> Int {
+        let rank = max(1, (total * percent) / 100)
+        var cumulative = 0
+        for bin in 0..<hist.count {
+            cumulative += hist[bin]
+            if cumulative >= rank {
+                return bin
+            }
+        }
+        return hist.count - 1
+    }
+
+    /// Absorption (`255 - normalized`) at or below which isolated structure (paper grain, faint
+    /// bleed-through ghosts) receives no anti-starvation contrast gain.
+    private static let contrastGateFloor = 16
+
+    /// Local peak absorption at and above which pixels receive the full multiplicative contrast gain.
+    private static let contrastGateFullGain = 40
+
+    /// Applies the regional anti-starvation contrast gain field to an unblended normalized image.
+    ///
+    /// Veiling glare adds a luminance pedestal that compresses ink absorption $A = 255 - I$
+    /// multiplicatively, so absorption is restored multiplicatively: $A' = A \cdot (1 + (g - 1) \cdot w)$,
+    /// where $g$ is the bilinearly interpolated regional gain. The gate weight $w$ is a smoothstep of the
+    /// local `3 x 3` peak absorption between `contrastGateFloor` and `contrastGateFullGain`, so
+    /// partial-coverage stroke-edge pixels inherit the full gain of the stroke core they border (keeping
+    /// stroke weight uniform across veiled and crisp regions), while isolated faint structure such as
+    /// paper grain and bleed-through ghosts stays untouched. For an isolated pixel the mapping is
+    /// $C^1$-continuous and strictly monotonic in $A$.
+    /// - Parameters:
+    ///   - pixels: Unblended normalized image, modified in place.
+    ///   - w: Image width in pixels.
+    ///   - h: Image height in pixels.
+    ///   - gainSmallQ8: Regional gain grid in Q8 fixed point (`256 == 1.0x`).
+    ///   - gridW: Gain grid width in cells.
+    ///   - xLUT: Horizontal bilinear lookup from image columns to grid cells.
+    ///   - yLUT: Vertical bilinear lookup from image rows to grid cells.
+    private static func applyContrastLeveling(
+        to pixels: inout ContiguousArray<UInt8>,
+        width w: Int,
+        height h: Int,
+        gainSmallQ8: borrowing ContiguousArray<Int>,
+        gridWidth gridW: Int,
+        xLUT: borrowing BilinearAxisLUT,
+        yLUT: borrowing BilinearAxisLUT
+    ) {
+        guard w > 0, h > 0 else { return }
+
+        let gateFloor = contrastGateFloor
+        var gateQ8 = ContiguousArray<Int>(repeating: 0, count: 256)
+        let gateSpan = Double(contrastGateFullGain - contrastGateFloor)
+        for n in 0..<256 {
+            let t = min(1.0, max(0.0, Double(n - gateFloor) / gateSpan))
+            gateQ8[n] = Int((t * t * (3.0 - 2.0 * t) * 256.0).rounded())
+        }
+
+        // Horizontal 3-tap minimum of the base quotient (darkest value == peak absorption).
+        var hMin = ContiguousArray<UInt8>(repeating: 255, count: w * h)
+        pixels.withUnsafeBufferPointer { src in
+            hMin.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<h {
+                    let row = y * w
+                    for x in 0..<w {
+                        var m = src[row + x]
+                        if x > 0 { m = min(m, src[row + x - 1]) }
+                        if x + 1 < w { m = min(m, src[row + x + 1]) }
+                        dst[row + x] = m
+                    }
+                }
+            }
+        }
+
+        gainSmallQ8.withUnsafeBufferPointer { gainPtr in
+            gateQ8.withUnsafeBufferPointer { gatePtr in
+                hMin.withUnsafeBufferPointer { minPtr in
+                    xLUT.i0.withUnsafeBufferPointer { x0Ptr in
+                        xLUT.i1.withUnsafeBufferPointer { x1Ptr in
+                            xLUT.frac.withUnsafeBufferPointer { fxPtr in
+                                pixels.withUnsafeMutableBufferPointer { dstPtr in
+                                    for y in 0..<h {
+                                        let row0 = yLUT.i0[y] * gridW
+                                        let row1 = yLUT.i1[y] * gridW
+                                        let fy = yLUT.frac[y]
+                                        let invFy = 256 - fy
+                                        let row = y * w
+                                        let rowUp = max(0, y - 1) * w
+                                        let rowDown = min(h - 1, y + 1) * w
+
+                                        for x in 0..<w {
+                                            let base = Int(dstPtr[row + x])
+                                            let peakBase = min(minPtr[row + x], min(minPtr[rowUp + x], minPtr[rowDown + x]))
+                                            let peakAbsorption = 255 - Int(peakBase)
+                                            guard base < 255, peakAbsorption > gateFloor else { continue }
+
+                                            let x0 = x0Ptr[x]
+                                            let x1 = x1Ptr[x]
+                                            let fx = fxPtr[x]
+                                            let invFx = 256 - fx
+                                            let gTop = gainPtr[row0 + x0] * invFx + gainPtr[row0 + x1] * fx
+                                            let gBot = gainPtr[row1 + x0] * invFx + gainPtr[row1 + x1] * fx
+                                            let gainQ8 = (gTop * invFy + gBot * fy + 32768) >> 16
+                                            guard gainQ8 > 256 else { continue }
+
+                                            let absorption = 255 - base
+                                            let boost = ((gainQ8 - 256) * absorption * gatePtr[peakAbsorption] + 32768) >> 16
+                                            dstPtr[row + x] = UInt8(max(0, base - boost))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private static func makeBilinearAxisLUT(srcLength: Int, targetLength: Int) -> BilinearAxisLUT {
         var i0 = ContiguousArray<Int>(repeating: 0, count: max(0, targetLength))
         var i1 = ContiguousArray<Int>(repeating: 0, count: max(0, targetLength))
@@ -1790,16 +1926,35 @@ public struct BackgroundNormalizer: Sendable {
         return vertical
     }
 
+    /// Boundary extension rule applied by `inpaintAndSmoothNormalized2D` beyond the grid edges.
+    internal enum SmoothingBoundary: Sendable {
+        /// Replicates the outermost cell (clamp-to-edge). Biases steep boundary ramps toward the interior.
+        case replicate
+        /// Point-reflects values about the outermost cell (`v(-k) = 2 v(0) - v(k)`) with mirrored weights,
+        /// so any symmetric kernel reproduces linear boundary ramps exactly and returns `v(0)` at the edge.
+        case linearExtrapolate
+    }
+
     /// Inpaints `weights == 0` holes via multi-stride normalized diffusion and applies separable
     /// normalized 2D Gaussian (or $O(1)$ 3-pass box-Gaussian for macro sigmas) convolution so
     /// missing foreground cells never pull down background estimates.
+    /// - Parameters:
+    ///   - values: Per-cell sample values (ignored where `weights == 0`).
+    ///   - weights: Per-cell sample confidence (`0` marks a hole to inpaint).
+    ///   - w: Grid width in cells.
+    ///   - h: Grid height in cells.
+    ///   - sigma: Gaussian smoothing $\sigma$ in cells (`<= 0.05` skips smoothing).
+    ///   - fallbackValue: Value returned when the grid holds no valid samples.
+    ///   - boundary: Boundary extension rule used by the smoothing kernel (default: `.replicate`).
+    /// - Returns: The inpainted and smoothed grid.
     internal static func inpaintAndSmoothNormalized2D(
         values: borrowing ContiguousArray<Float>,
         weights: borrowing ContiguousArray<Float>,
         width w: Int,
         height h: Int,
         sigma: Double,
-        fallbackValue: Float
+        fallbackValue: Float,
+        boundary: SmoothingBoundary = .replicate
     ) -> ContiguousArray<Float> {
         let count = w * h
         guard count > 0 else { return [] }
@@ -1915,12 +2070,147 @@ public struct BackgroundNormalizer: Sendable {
             return filled
         }
 
+        switch boundary {
+        case .replicate:
+            return smoothNormalized2D(
+                values: filled,
+                weights: confWeight,
+                width: w,
+                height: h,
+                sigma: sigma,
+                fallbackValue: fallbackValue
+            )
+        case .linearExtrapolate:
+            let pad = smoothingSupportRadius(sigma: sigma)
+            let padded = padByLinearReflection(
+                values: filled,
+                weights: confWeight,
+                width: w,
+                height: h,
+                pad: pad
+            )
+            let paddedW = w + 2 * pad
+            let smoothedPadded = smoothNormalized2D(
+                values: padded.values,
+                weights: padded.weights,
+                width: paddedW,
+                height: h + 2 * pad,
+                sigma: sigma,
+                fallbackValue: fallbackValue
+            )
+            var cropped = ContiguousArray<Float>(repeating: fallbackValue, count: count)
+            smoothedPadded.withUnsafeBufferPointer { src in
+                cropped.withUnsafeMutableBufferPointer { dst in
+                    for y in 0..<h {
+                        let srcRow = (y + pad) * paddedW + pad
+                        let dstRow = y * w
+                        for x in 0..<w {
+                            dst[dstRow + x] = src[srcRow + x]
+                        }
+                    }
+                }
+            }
+            return cropped
+        }
+    }
+
+    /// Full one-sided reach (in cells) of the kernel applied by `smoothNormalized2D` for `sigma`.
+    private static func smoothingSupportRadius(sigma: Double) -> Int {
+        if sigma > 5.0 {
+            return 3 * max(2, Int(sigma.rounded()))
+        }
+        return min(20, max(1, Int(ceil(3.0 * sigma))))
+    }
+
+    /// Pads a grid by `pad` cells on every side, point-reflecting values about the outermost
+    /// row/column (`v(-k) = 2 v(0) - v(k)`) and mirroring weights, so linear trends continue
+    /// unbiased across the boundary. Reflection indices clamp to the grid on undersized grids.
+    private static func padByLinearReflection(
+        values: borrowing ContiguousArray<Float>,
+        weights: borrowing ContiguousArray<Float>,
+        width w: Int,
+        height h: Int,
+        pad p: Int
+    ) -> (values: ContiguousArray<Float>, weights: ContiguousArray<Float>) {
+        let pw = w + 2 * p
+        let ph = h + 2 * p
+        var outV = ContiguousArray<Float>(repeating: 0.0, count: pw * ph)
+        var outW = ContiguousArray<Float>(repeating: 0.0, count: pw * ph)
+
+        values.withUnsafeBufferPointer { vIn in
+            weights.withUnsafeBufferPointer { wIn in
+                outV.withUnsafeMutableBufferPointer { vOut in
+                    outW.withUnsafeMutableBufferPointer { wOut in
+                        // Horizontal extension of every original row.
+                        for y in 0..<h {
+                            let srcRow = y * w
+                            let dstRow = (y + p) * pw
+                            let leftPivot = vIn[srcRow]
+                            let rightPivot = vIn[srcRow + w - 1]
+                            for px in 0..<pw {
+                                let ox = px - p
+                                if ox < 0 {
+                                    let j = min(w - 1, -ox)
+                                    vOut[dstRow + px] = 2.0 * leftPivot - vIn[srcRow + j]
+                                    wOut[dstRow + px] = wIn[srcRow + j]
+                                } else if ox >= w {
+                                    let j = max(0, 2 * (w - 1) - ox)
+                                    vOut[dstRow + px] = 2.0 * rightPivot - vIn[srcRow + j]
+                                    wOut[dstRow + px] = wIn[srcRow + j]
+                                } else {
+                                    vOut[dstRow + px] = vIn[srcRow + ox]
+                                    wOut[dstRow + px] = wIn[srcRow + ox]
+                                }
+                            }
+                        }
+
+                        // Vertical extension of every (already horizontally padded) column.
+                        let topRow = p * pw
+                        let bottomRow = (p + h - 1) * pw
+                        for py in 0..<ph {
+                            let oy = py - p
+                            guard oy < 0 || oy >= h else { continue }
+                            let dstRow = py * pw
+                            let pivotRow: Int
+                            let mirrorRow: Int
+                            if oy < 0 {
+                                pivotRow = topRow
+                                mirrorRow = (p + min(h - 1, -oy)) * pw
+                            } else {
+                                pivotRow = bottomRow
+                                mirrorRow = (p + max(0, 2 * (h - 1) - oy)) * pw
+                            }
+                            for px in 0..<pw {
+                                vOut[dstRow + px] = 2.0 * vOut[pivotRow + px] - vOut[mirrorRow + px]
+                                wOut[dstRow + px] = wOut[mirrorRow + px]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return (outV, outW)
+    }
+
+    /// Separable normalized 2D Gaussian (or $O(1)$ 3-pass box-Gaussian for `sigma > 5`) convolution
+    /// of `values` weighted by `weights`, with clamp-to-edge replication at the grid boundary.
+    private static func smoothNormalized2D(
+        values filled: borrowing ContiguousArray<Float>,
+        weights confWeight: borrowing ContiguousArray<Float>,
+        width w: Int,
+        height h: Int,
+        sigma: Double,
+        fallbackValue: Float
+    ) -> ContiguousArray<Float> {
+        let count = w * h
+
         // For macro smoothing scales (`sigma > 5.0`), 3-pass separable running-sum box smoothing
         // runs in exact O(w * h) time independent of radius and has zero truncation cap.
         if sigma > 5.0 {
             let boxRadius = max(2, Int(sigma.rounded()))
             var numField = ContiguousArray<Float>(repeating: 0.0, count: count)
-            var denField = confWeight
+            var denField = copy confWeight
             filled.withUnsafeBufferPointer { fPtr in
                 confWeight.withUnsafeBufferPointer { wPtr in
                     numField.withUnsafeMutableBufferPointer { nPtr in

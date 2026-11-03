@@ -362,8 +362,10 @@ struct DualPassIlluminationTests {
         let height = 1120
         var denseGT = BinaryBitmap(width: width, height: height, initialBlack: false)
 
-        // Create two tightly-leaded dense dictionary columns with bold stems & crossbars
-        // where almost every 4x4 Pass 1 block overlaps dark ink or gray stroke skirts.
+        // Create two dense dictionary columns set solid: every glyph body spans the full 24-px line
+        // (bold ascender-to-baseline entry face), so with 4-px leading and 4-px inter-glyph gaps every
+        // 4x4 Pass 1 block overlaps ink or stroke skirts, while 2-px clean paper channels survive at
+        // the gap centres for Pass 2's per-pixel paper sampling.
         let colRanges = [(90, 445), (515, 870)]
         for (colX0, colX1) in colRanges {
             var y = 110
@@ -374,12 +376,11 @@ struct DualPassIlluminationTests {
                 while x + 24 < colX1 {
                     let isBoldHeadword = (row % 3 == 0 && g < 3)
                     let sw = isBoldHeadword ? 7 : 5
-                    let h = (g % 4 == 0) ? 24 : 18
-                    let yTop = y + (24 - h)
-                    Self.fillRect(&denseGT, Rect2I(x: x, y: yTop, width: sw, height: h))
-                    Self.fillRect(&denseGT, Rect2I(x: x + sw + 4, y: yTop, width: sw, height: h))
-                    Self.fillRect(&denseGT, Rect2I(x: x, y: yTop, width: 2 * sw + 4, height: 4))
-                    if isBoldHeadword {
+                    Self.fillRect(&denseGT, Rect2I(x: x, y: y, width: sw, height: 24))
+                    Self.fillRect(&denseGT, Rect2I(x: x + sw + 4, y: y, width: sw, height: 24))
+                    Self.fillRect(&denseGT, Rect2I(x: x, y: y, width: 2 * sw + 4, height: 4))
+                    if isBoldHeadword || g % 3 == 1 {
+                        // Bold headword baseline bars and closed bowls
                         Self.fillRect(&denseGT, Rect2I(x: x, y: y + 20, width: 2 * sw + 4, height: 4))
                     }
                     x += 2 * sw + 8
@@ -392,7 +393,10 @@ struct DualPassIlluminationTests {
             }
         }
 
-        // Ground-truth smooth paper illumination surface (222 at top-right -> 172 at bottom-left)
+        // Ground-truth smooth paper illumination surface (222 at top-right -> 172 at bottom-left), with
+        // printing ink (85% absorption) imaged through a realistic 3x3 binomial optical PSF (sigma ~ 0.7 px):
+        // stroke edges sit at partial coverage and soft 25%-coverage skirts bleed into every narrow gap.
+        let inkAbsorption = 0.85
         var truePaper = ContiguousArray<UInt8>(repeating: 214, count: width * height)
         var sourcePixels = ContiguousArray<UInt8>(repeating: 214, count: width * height)
         for y in 0..<height {
@@ -403,25 +407,14 @@ struct DualPassIlluminationTests {
                 let paperVal = UInt8(clamping: p)
                 truePaper[y * width + x] = paperVal
 
-                // Include 1-px optical ink skirt around strokes (realistic sub-pixel bleed into inter-line gaps)
-                if denseGT[x, y] {
-                    sourcePixels[y * width + x] = UInt8(clamping: Int((Double(paperVal) * 0.36).rounded()))
-                } else {
-                    var touchesInk = false
-                    let ny0 = max(0, y - 1), ny1 = min(height - 1, y + 1)
-                    let nx0 = max(0, x - 1), nx1 = min(width - 1, x + 1)
-                    for ny in ny0...ny1 where !touchesInk {
-                        for nx in nx0...nx1 where denseGT[nx, ny] {
-                            touchesInk = true
-                            break
-                        }
-                    }
-                    if touchesInk {
-                        sourcePixels[y * width + x] = UInt8(clamping: Int((Double(paperVal) * 0.72).rounded()))
-                    } else {
-                        sourcePixels[y * width + x] = paperVal
+                var coverageWeight = 0
+                for ny in max(0, y - 1)...min(height - 1, y + 1) {
+                    for nx in max(0, x - 1)...min(width - 1, x + 1) where denseGT[nx, ny] {
+                        coverageWeight += (nx == x && ny == y) ? 4 : ((nx == x || ny == y) ? 2 : 1)
                     }
                 }
+                let lum = Double(paperVal) * (1.0 - inkAbsorption * Double(coverageWeight) / 16.0)
+                sourcePixels[y * width + x] = UInt8(clamping: Int(lum.rounded()))
             }
         }
 
@@ -454,8 +447,9 @@ struct DualPassIlluminationTests {
         let maePass1 = errPass1Sum / Double(max(1, sampleCount))
         let maePass2 = errPass2Sum / Double(max(1, sampleCount))
 
-        // Pass 1 sags significantly inside dense columns due to ink/halo contamination,
-        // while Pass 2 reconstructs the true paper illumination surface within ~2.5 gray levels!
+        // Pass 1 sags significantly inside dense columns because every block averages ink and PSF skirts,
+        // while Pass 2's skirt-rejecting per-pixel paper sampling reconstructs the true illumination surface
+        // within a fraction of a gray level!
         #expect(maePass1 > 8.0)
         #expect(maePass2 < 3.0)
         #expect(maePass2 < maePass1 * 0.35)
@@ -541,6 +535,34 @@ struct DualPassIlluminationTests {
 
         #expect(spineMarginFalsePositives == 0)
         #expect(Double(nearSpineHits) / Double(max(1, nearSpineTotal)) >= 0.94)
+
+        // Unit invariant behind the fix: Pass 2's point-reflected boundary smoothing reproduces a steep
+        // linear boundary ramp exactly (including the outermost cells), whereas clamp-to-edge replication
+        // drags the boundary cell toward the brighter interior and leaves a gray gutter cloud.
+        let rampW = 24
+        let rampH = 6
+        let ramp = ContiguousArray<Float>((0..<(rampW * rampH)).map { Float(100 + 6 * ($0 % rampW)) })
+        let unitWeights = ContiguousArray<Float>(repeating: 1.0, count: rampW * rampH)
+        let reflected = BackgroundNormalizer.inpaintAndSmoothNormalized2D(
+            values: ramp,
+            weights: unitWeights,
+            width: rampW,
+            height: rampH,
+            sigma: 4.0,
+            fallbackValue: 255.0,
+            boundary: .linearExtrapolate
+        )
+        let replicated = BackgroundNormalizer.inpaintAndSmoothNormalized2D(
+            values: ramp,
+            weights: unitWeights,
+            width: rampW,
+            height: rampH,
+            sigma: 4.0,
+            fallbackValue: 255.0
+        )
+        let maxReflectedError = zip(reflected, ramp).map { abs($0 - $1) }.max() ?? .infinity
+        #expect(maxReflectedError < 0.01)
+        #expect(replicated[0] > ramp[0] + 6.0)
     }
 
     @Test("Soft C1 noise gate protects reverse-side bleed-through and paper fiber grain during anti-starvation contrast leveling")

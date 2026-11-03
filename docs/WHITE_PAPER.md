@@ -414,4 +414,40 @@ To advance **ScanTailorReborn** from its current v2.0 baseline to complete **v1.
 
 ---
 
+### Anthropic Model Execution Matrix (Claude Code)
+
+The matrix above was calibrated for Gemini **Argon** and **Flash**. The table below gives the equivalent recommendation when driving the roadmap from **Claude Code** with Anthropic models. *Effort* refers to Claude Code's reasoning-effort setting (`low`, `medium`, `high`, `xhigh`, `max`; set with `/effort`), and models are switched with `/model`.
+
+This is not a straight Argon → Opus, Flash → Haiku substitution:
+- **Opus** is reserved for numerical computer vision, fixed-point image math, and architectural work where a subtle error shows up only as a degraded benchmark (e.g. threshold starvation or gutter clouds). It is also the strongest at reading diagnostic overlay PNGs.
+- **Sonnet** takes most integration and heuristic-plumbing work, including several substeps that Argon was assigned at **Medium** (CLI flags, manifest overrides, mask wiring). Sonnet handles Swift 6 strict concurrency and `Codable` schema evolution reliably at this level.
+- **Haiku** is limited to mechanical, low-risk release chores. It is not recommended for any substep that touches `Sendable`/actor isolation or pipeline numerics.
+- **`xhigh`** is used only where the work is iterative numerical debugging against tight test tolerances (4.2.2), where cutting reasoning short tends to produce tolerance-tweaking instead of root-cause fixes.
+
+| (Sub)step Number & Name | Gemini (Model / Effort) | Claude Model | Claude Effort | Rationale |
+| :--- | :---: | :---: | :---: | :--- |
+| **4.1.1: Automatic Font-Scale & Glyph Height Analyzer** | Argon / High | **Opus** | **high** | Statistical typography inference; errors silently mis-scale the whole book. *(Completed.)* |
+| **4.1.2: CLI & Manifest Dimension Controls** | Argon / Medium | **Sonnet** | **medium** | Argument parsing, presets, and backward-compatible `Codable` fields; well-specified plumbing. *(Completed.)* |
+| **4.1.3: Anti-Billboard Normalization & Escalation** | Flash / Low | **Sonnet** | **low** | Small clamp plus manifest flag, but it defines agent-escalation semantics; Sonnet over Haiku for safety. *(Completed.)* |
+| **4.2.1: Dynamic Kernel Radius & Sigma Derivation** | Argon / High | **Opus** | **high** | Kernel/sigma derivation, pyramid factors, and bit-exact van Herk morphology. *(Completed.)* |
+| **4.2.2: Dual-Pass Illumination Flattening** | Argon / High | **Opus** | **xhigh** | The last three failures needed root-cause analysis across Q6/`UInt16` fixed-point fields, inpainting, boundary smoothing, and contrast-gain laws, without just loosening tolerances. *(Completed.)* |
+| **5.1.1: Paper Edge & Contrast Boundary Detection** | Argon / High | **Opus** | **high** | Multi-scale edge detection and quad fitting against textured desks; many failure modes. |
+| **5.1.2: Perspective Rectification & Sheet Cropping** | Argon / High | **Opus** | **medium** | Homography (DLT) is textbook, but coordinate-frame chaining into split/dewarp stages needs care. |
+| **5.2.1: Pre-Binarization Table Surface Masking** | Argon / Medium | **Sonnet** | **high** | Threading a validity mask through morphology and binarization; broad but mostly mechanical. |
+| **5.2.2: Macro-Cluster Border Cleaning Fallback** | Flash / Medium | **Sonnet** | **medium** | Bounded heuristic extension of `BorderAndSpeckleCleaner` with clear test targets. |
+| **6.1.1: Running Header & Top Baseline Detection** | Argon / High | **Opus** | **high** | Cross-page clustering with heavy edge cases (chapter openers, folios, absent headers). |
+| **6.1.2: Vertical Page Registration Anchor** | Argon / Medium | **Sonnet** | **high** | Applies 6.1.1 output to layout; logic is clear, but tier exceptions need thoroughness. |
+| **6.2.1: Consensus Dimension Clustering** | Flash / Medium | **Sonnet** | **medium** | Median/IQR grouping; standard statistics. |
+| **6.2.2: Independent Outlier Trim Box** | Flash / Low | **Sonnet** | **low** | Localized change in `ApplePDFDocumentWriter`; Haiku is viable but Quartz/PDF APIs favor Sonnet. |
+| **6.3.1: Manifest-Driven Per-Page Adjustments** | Argon / Medium | **Sonnet** | **high** | Schema design and many override paths through the coordinator; breadth over depth. |
+| **6.3.2: Cache-Accelerated Sub-2s Re-Rendering** | Argon / High | **Opus** | **high** | Cache keys, invalidation, and actor-isolated intermediates under a hard latency budget. |
+| **7.1.1: Multi-Document Benchmark Validation** | Flash / Medium | **Sonnet** | **medium** | Long-running scripted runs with structured result interpretation. |
+| **7.1.2: Visual & Metric Inspection** | Argon / Medium | **Opus** | **medium** | Judging diagnostic overlays and PDFs against the 10 criteria benefits from Opus's vision. |
+| **7.2.1: CLI Documentation & Agent Skill Reference** | Flash / Low | **Sonnet** | **low** | The agent skill reference must be exactly accurate to the CLI; Sonnet verifies against source. |
+| **7.2.2: Version Tagging & CHANGELOG Finalization** | Flash / Low | **Haiku** | **low** | Mechanical summarization of commit history and tagging. |
+
+**Summary:** 8 substeps on Opus (1 at `xhigh`), 10 on Sonnet, 1 on Haiku. Phase 4 is complete; of the remaining work (5.1.1 onward), 5 substeps are on Opus, 8 on Sonnet, and 1 on Haiku.
+
+---
+
 By executing this final roadmap, **ScanTailorReborn** will attain complete v1.0.0 production maturity, delivering flawless, publication-grade document reconstruction across professional flatbed scanners, production photocopiers, and uncalibrated smartphone cameras alike in pair-programming harmony with autonomous AI agents.

@@ -1,8 +1,8 @@
 # ScanTailorReborn — Cross-Machine Handoff & Active Engineering State
 
-**Last Updated**: 2026-11-02  
+**Last Updated**: 2026-11-03  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 4, Step 4.2, **Substep 4.2.2 — Dual-Pass Illumination Flattening (Anti-Starvation)** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), lines 302–305)
+**Current Active Milestone**: Phase 5, Step 5.1, **Substep 5.1.1 — Paper Edge & Contrast Boundary Detection** (`DocumentQuadDetector`, [`docs/WHITE_PAPER.md`](WHITE_PAPER.md), lines 311–315) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -25,11 +25,11 @@ Run from the repository root:
 swift build
 swift test
 ```
-All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **98 tests across 17 suites**, passing with 0 warnings).
+All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **103 tests across 18 suites**, passing with 0 warnings).
 
 ### 1.3 Notes on Git-Ignored & External Items
 - **Git Remote**: Check `git remote -v`. If no remote is configured when migrating, either push `main` to a new remote (`git remote add origin <url> && git push -u origin main`) or transfer via `git bundle create scantailor.bundle --all`.
-- **`.agents/` (Git-Ignored)**: Listed in [`.gitignore`](../.gitignore). Holds optional local agent skills (`swift-expert`, `skill-creator`); **not** required to build, test, or develop.
+- **`.agents/` & `.claude/` (Git-Ignored)**: Listed in [`.gitignore`](../.gitignore). `.agents/` holds optional local agent skills (`swift-expert`, `skill-creator`) and `.claude/skills/` holds the Claude Code copy of `swift-expert`; neither is required to build, test, or develop. Copy them manually when migrating machines.
 - **Empirical Benchmark PDFs (External / Cloud-Synced)**: [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) references three real-world test PDFs stored outside the repo in `OneDrive-MRC/PDFs-in-the-making/`:
   - `flannery.1993` (*Flannery 1993* — clean calibrated scan)
   - `vermeersch.1934` (*Vermeersch 1934* — photocopied two-page spreads with dark gutter seams)
@@ -53,14 +53,14 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 
 ### 2.2 Completed Phases & Roadmap to `v1.0.0`
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
-  - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **In Progress (`4.1.1` – `4.2.1` Completed; `4.2.2` Active)**
-  - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — Pending
+  - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **Completed**
+  - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **Next (`5.1.1` Active, not yet started)**
   - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — Pending
   - **Phase 7**: Verification & Final `v1.0.0` Release (`7.1.1` – `7.2.2`) — Pending
 
 ---
 
-## 3. Completed Phase 4 Substeps (`4.1.1`–`4.2.1`) & Active Substep 4.2.2 State
+## 3. Completed Phase 4 Substeps (`4.1.1`–`4.2.2`)
 
 ### 3.1 Recently Completed: Substep 4.1.1 (`FontScaleAnalyzer`)
 Implemented automatic font-scale heuristic, median glyph height analyzer, and pre-raster camera-wrapper scale rescue across 4 source/CLI/test layers:
@@ -122,73 +122,30 @@ Implemented glyph-scale adaptive morphological closing radius, Gaussian smoothin
 3. **Tests (`98/98` passing across 17 suites, 0 warnings)**:
    - [`Tests/ScanTailorCoreTests/GlyphAdaptiveNormalizationTests.swift`](../Tests/ScanTailorCoreTests/GlyphAdaptiveNormalizationTests.swift) (5 unit/pipeline tests covering `deriveKernelParameters` mathematical invariants & `Codable`, 72-DPI camera character-erosion prevention vs fixed-DPI starvation, calibrated 300-DPI bold stroke-width protection, blank/illustration fallbacks, bit-exact van Herk equivalence, and Pass 1 `BookPipelineCoordinator` integration).
 
-### 3.5 Active Work State: Substep 4.2.2 — Dual-Pass Illumination Flattening (Anti-Starvation)
-Status: **Implementation in progress (2/5 new tests passing, 98/98 existing tests passing, 0 warnings)**
-
-#### 3.5.1 Work Completed So Far
-1. **Mathematical Invariants & Dual-Pass Background Quotient Engine** ([`Sources/ScanTailorCore/Binarization/BackgroundNormalizer.swift`](../Sources/ScanTailorCore/Binarization/BackgroundNormalizer.swift)):
-   - **Extended Telemetry & Configuration**:
-     - Added `dualPassApplied: Bool`, `secondPassDownsampledBlurSigma: Double`, `contrastLevelingApplied: Bool`, and `peakContrastGain: Double` to `DerivedKernelParameters` (`Codable` with `decodeIfPresent` defaults).
-     - Added `enableDualPassFlattening: Bool = true`, `secondPassBlurSigmaScale: Double = 0.65`, `enableAntiStarvationContrastLeveling: Bool = true`, and `maximumContrastGain: Double = 2.50` (`[1.0, 3.5]`) to `BackgroundNormalizer.Configuration` (`Codable` with backward-compatible defaults).
-   - **Pass 1 & Unclipped Quotient Calculation**:
-     - Computes coarse glyph-bridging closing and Gaussian smoothing on downsampled grid.
-     - Upsamples Pass 1 background to full resolution and computes unclipped fixed-point quotient $Q_1 = (I \cdot 255) / B_1$ in `UInt16` (`[0, 1020]`), eliminating 8-bit clipping so both dark ink and bright highlights retain exact relative ratios.
-   - **Slope-Aware Morphological Closing (`closeSlopeAwareUInt16`)**:
-     - Developed $O(N)$ separable 1D closing with continuous boundary-slope extrapolation when boundary pixels follow a smooth gradient (`v >= 96 && abs(v - vRef) <= 28 * dist`).
-     - Eliminates upward slope bias on steep spine-boundary ramps and camera vignette slopes right down to $x = 0$, preventing artificial gutter shadows.
-   - **Pass 2 Pure-Paper Sampling & Diffusion Inpainting**:
-     - Samples pure paper pixels ($s \ge \text{rawPaperFloor}$ and $Q_1 \ge \max(96, 0.88 \cdot \text{crest})$), discarding ink cores and stroke skirts.
-     - Inpaints ink-covered cells using multi-stride normalized spatial diffusion (`strides = [1, 1, 2, 4, 8, 16, 32]`) and applies normalized Gaussian smoothing ($\sigma_2 = 0.65 \cdot \sigma_1$) to form residual background $B_2$.
-     - Computes composite background $B_{\text{eff}} = \min(255, \max(1, (B_1 \cdot B_2) / 255))$ in Q6 fixed-point format (`backgroundSmallQ6`).
-   - **Anti-Starvation Contrast Leveling**:
-     - Measures ink-core foreground absorption $A = 255 - Q_2$ for cells with $Q_1 \le 0.78 \cdot \text{crest}$.
-     - Detects veiling-glare contrast depression ($p_{10} < p_{80} - 6.0$).
-     - Smooths macro glare envelope via $O(1)$ 3-pass running-sum box blur (`boxBlur2DClampedFloat`), free from Gaussian kernel-radius truncation.
-     - Applies $C^1$-smooth noise-gated quadratic-to-linear boost above noise floor ($A > 16$, $Q_2 < 239$), harmonizing veiled ink cores to crisp black without boosting paper grain or faint bleed-through.
-   - **Fast Bilinear Axis LUT Precomputation**:
-     - Added `makeBilinearAxisLUT` to precalculate horizontal interpolation coordinates and weights in $O(W)$ instead of $O(W \cdot H)$ floating-point calculations during normalization and upsampling.
-
-2. **Outlier-Robust Wolf-Jolion Anchor Estimation** ([`Sources/ScanTailorCore/Binarization/AdaptiveBinarizer.swift`](../Sources/ScanTailorCore/Binarization/AdaptiveBinarizer.swift)):
-   - Updated `measureWolfJolionAnchors` to sample the interior $[8.3\%..91.7\%]$ region of the page (with automatic full-page fallback if interior `maxStdDev < 3.0`).
-   - Uses $0.05\%$ quantile for dark anchor $M$ (`minGray`) and $98\%$ active-window quantile for peak variance $R_{\max}$ (`maxStdDev`).
-   - Prevents peripheral camera desk borders (e.g. $x < 22$ dark wood strips) from poisoning global Wolf-Jolion parameters.
-
-3. **Passing Test Suites & Diagnostics** ([`Tests/ScanTailorCoreTests/DualPassIlluminationTests.swift`](../Tests/ScanTailorCoreTests/DualPassIlluminationTests.swift)):
-   - **98/98 existing tests across 17 suites pass** with 0 warnings.
-   - **2/5 new tests in `DualPassIlluminationTests` pass**:
-     - `testCodableBackwardCompatibilityEdgeCasesAndBookPipelineUniformity` (JSON encoding/decoding backward compatibility, zero strength passthrough, dark sheet, and 300-DPI `BookPipelineCoordinator` Pass 1 pipeline).
-     - `testBleedThroughAndPaperGrainAreProtectedBySoftNoiseGate` (Verified zero false positives on reverse-side bleed-through ghosts and random paper fiber noise under contrast leveling).
-
-#### 3.5.2 Diagnostics for the 3 Remaining Tests in `DualPassIlluminationTests.swift`
-1. **`testSimpsonPage2GradientAndGlareAchievesUniformStrokeWeightWithoutStarvation`**:
-   - Status: Paper flattening and glare recovery work properly (upper paper $\ge 250$, lower paper $\ge 250$, upper ink mean $< 112.0$, upper/lower text recall both $\ge 92\%$ vs single-pass $< 72\%$).
-   - Current Failure: Line 354 `abs(upperStemWidth - lowerStemWidth) <= 0.60` measured `1.81 px`.
-   - Action Needed: Investigate why upper glared stem run width is `1.81 px` different from lower stem run width. Check the binarization threshold / contrast gain multiplier, or tune `measureMeanStemRunWidth` scanline sampling / tolerance in the test.
-2. **`testDenseMultiColumnTextDoesNotDepressBackgroundEstimateInPass2`**:
-   - Status: Runs and estimates background cleanly, but Pass 1 error was low (`maePass1 = 0.143` vs expected `> 8.0`).
-   - Current Failure: Lines 459 & 461 `maePass1 > 8.0` and `maePass2 < maePass1 * 0.35`.
-   - Action Needed: The synthetic two-column layout currently has enough pure paper between words/lines that Pass 1's sliding maximum captures uncontaminated paper. Adjust the synthetic column fixture (e.g. tighter line leading or a realistic optical PSF blur spreading ink across narrow inter-line gaps) so that Pass 1's downsampled area averaging is pulled down by ink skirts (`maePass1 > 6.0..8.0`) while Pass 2's pure paper sampling isolates clean gap centers (`maePass2 < 3.0` and `maePass2 < maePass1 * 0.40`).
-3. **`testSteepBoundarySpineShadowFlattensRightUpToPageEdgeWithoutGutterCloud`**:
-   - Status: Steep spine shadow paper is flattened from $< 165$ (single pass) to $\ge 242.0$ (dual pass), and spine-adjacent text recall is $\ge 94\%$.
-   - Current Failure: Line 542 `spineMarginFalsePositives == 0` measured `1476` false positive pixels in margin $x = 4..<32$.
-   - Action Needed: Check the paper background estimate right at the boundary $x = 4..<32$. Ensure `closeSlopeAwareUInt16` extrapolation or `rawB2` paper floor in `computeResolvedSmallFields` correctly covers the boundary margin cells so the threshold does not dip below the spine paper level.
+### 3.5 Recently Completed: Substep 4.2.2 (`Dual-Pass Illumination Flattening & Anti-Starvation`)
+Implemented dual-pass background quotient flattening and multiplicative anti-starvation contrast leveling in [`Sources/ScanTailorCore/Binarization/BackgroundNormalizer.swift`](../Sources/ScanTailorCore/Binarization/BackgroundNormalizer.swift), plus outlier-robust Wolf-Jolion anchors in [`AdaptiveBinarizer.swift`](../Sources/ScanTailorCore/Binarization/AdaptiveBinarizer.swift):
+1. **Configuration & Telemetry** (backward-compatible `decodeIfPresent`): `enableDualPassFlattening` (`true`), `secondPassBlurSigmaScale` (`0.65`), `enableAntiStarvationContrastLeveling` (`true`), `maximumContrastGain` (`2.50`, `[1.0, 3.5]`); `DerivedKernelParameters` gains `dualPassApplied`, `secondPassDownsampledBlurSigma`, `contrastLevelingApplied`, `peakContrastGain`.
+2. **Pass 1 → Pass 2 residual background**: unclipped `UInt16` quotient $Q_1 = 255 \cdot I / B_1$; a **mode-seeking per-block crest** (two successive trimmed upper means, `q1 >= 15/16 * current`) closed by slope-aware `closeSlopeAwareUInt16`; pure-paper sampling at $Q_1 \ge 0.88 \cdot \text{crest}$ with **PSF-skirt rejection** (candidates below $0.96 \cdot \text{crest}$ that touch a foreground pixel, $Q_1 \le 0.78 \cdot \text{crest}$, are discarded); multi-stride diffusion inpainting; and normalized Gaussian smoothing with **point-reflected boundaries** (`SmoothingBoundary.linearExtrapolate`, $v(-k) = 2v(0) - v(k)$), which reproduces linear edge ramps exactly. $B_{\text{eff}} = B_1 \cdot B_2 / 255$ in Q6 fixed point.
+3. **Anti-starvation contrast leveling**: the ink-core absorption envelope is sampled only from paper-supported cells, rejecting outliers above `p90 + 40` (desk strips / black borders). The crisp reference is `clamp(p90, 145, 175)` and the gain is $g = \text{target}/\text{env}$, applied **multiplicatively** ($A' = A \cdot (1 + (g-1)\,w)$, because veiling glare compresses absorption multiplicatively). The smoothstep gate $w$ (absorption 16 → 40) is driven by the **3×3 peak absorption**, so stroke-edge pixels inherit their stroke's gain (uniform stroke weight) while isolated grain and bleed-through (absorption ≤ 16) stay untouched.
+4. **Root causes fixed while closing the last 3 tests**:
+   - *Spine gutter cloud (1476 → 0 false positives at `x = 4..6`)*: the Pass 2 clamp-to-edge Gaussian over-estimated the steep spine ramp in the outermost cells, so normalized paper there was only 185–215. The point-reflected boundary fixes this.
+   - *Stroke-weight non-uniformity (Wolf-Jolion 7 px upper vs 9 px lower → 9/9; Sauvola 7/7)*: three compounding causes. (a) The affine boost `16 + g·(A − 16)` under-boosted 25 %-coverage PSF skirts. (b) The x < 22 desk strip read as "ink" at absorption ≈ 238 and inflated the envelope. (c) Faint veiled skirts (0.92 × paper) passed the 0.88 paper gate and biased $B_{\text{eff}}$ 1.9 % low in veiled text rows (now +0.05 %), which the gain then amplified.
+   - *Dense columns*: the old fixture left clean 4×4 blocks above short glyphs (Pass 1 MAE 0.14, so there was nothing to recover). The fixture now sets uniform 24-px bodies solid through a realistic 3×3 binomial PSF (85 % ink absorption): MAE₁ = 9.07, MAE₂ = 0.27. Under that realistic PSF the previous crest/paper gate made Pass 2 *worse* than Pass 1, which the mode-seeking crest and skirt rejection fix.
+5. **Tests (`103/103` passing across 18 suites, 0 warnings on a clean build)**:
+   - [`Tests/ScanTailorCoreTests/DualPassIlluminationTests.swift`](../Tests/ScanTailorCoreTests/DualPassIlluminationTests.swift) (5 tests). These cover Simpson glare/gradient stroke-weight uniformity (Wolf-Jolion & Sauvola), dense multi-column Pass 2 recovery, the steep spine shadow (plus a direct linear-reflection invariant check), the bleed-through/grain noise gate, and Codable/edge cases/`BookPipelineCoordinator` Pass 1 uniformity.
 
 ---
 
 ## 4. Next Milestone Resume Prompt
 
-To resume engineering on **Substep 4.2.2**, copy and provide the following prompt:
+To begin **Phase 5, Substep 5.1.1**, copy and provide the following prompt:
 
 ```markdown
-We are resuming development of ScanTailorReborn on Substep 4.2.2: Dual-Pass Illumination Flattening (Anti-Starvation).
+We are starting Phase 5 of ScanTailorReborn: Substep 5.1.1 — Paper Edge & Contrast Boundary Detection (`DocumentQuadDetector`).
 
-1. Read `.agents/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review Section 3.5 of `docs/HANDOFF.md` for the current status of Substep 4.2.2.
-3. Fix the 3 remaining test issues in `Tests/ScanTailorCoreTests/DualPassIlluminationTests.swift` and `Sources/ScanTailorCore/Binarization/BackgroundNormalizer.swift`:
-   - `testSimpsonPage2GradientAndGlareAchievesUniformStrokeWeightWithoutStarvation`: stem run width uniformity (`abs(upperStemWidth - lowerStemWidth) <= 0.60`).
-   - `testDenseMultiColumnTextDoesNotDepressBackgroundEstimateInPass2`: realistic optical PSF ink spread causing Pass 1 depression (`maePass1`) and Pass 2 recovery (`maePass2`).
-   - `testSteepBoundarySpineShadowFlattensRightUpToPageEdgeWithoutGutterCloud`: resolve the 1476 margin false positives in `x = 4..<32`.
-4. Run `swift test --filter DualPassIlluminationTests` (sandboxed first, then with bypass if needed) until all 5 tests pass.
-5. Run full `swift test` and confirm 103/103 tests pass with 0 warnings across all 18 suites.
-6. Update `docs/HANDOFF.md` to mark Substep 4.2.2 and Phase 4 complete, advance milestone to Phase 5 Substep 5.1.1, report concisely with clickable file:// links, and pause before starting Phase 5.
+1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
+2. Review `docs/HANDOFF.md` (Sections 2–3) and `docs/WHITE_PAPER.md` Phase 5 (Steps 5.1–5.2, lines 309–330) plus the v1.0 Release Criteria.
+3. Propose a design for a 4-corner document quadrangle estimator in `ScanTailorCore` (multi-scale edge detection, gradient-magnitude filtering, convex-hull / quad fitting against dark or textured desks), including its public API, failure/confidence reporting, and synthetic test fixtures (camera spread on a wooden desk, low-contrast desk, partial occlusion, no-desk calibrated scan). Pause for approval before implementing.
+4. After approval, implement with tests, run `swift test` (sandboxed first, then with bypass if needed), and confirm all tests pass with 0 warnings.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 5.1.2.
 ```
