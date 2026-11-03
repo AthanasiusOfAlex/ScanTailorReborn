@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-03  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 5, Step 5.1, **Substep 5.1.2 — Perspective Rectification & Sheet Cropping** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), lines 316–319) — *not yet started*
+**Current Active Milestone**: Phase 5, Step 5.2, **Substep 5.2.1 — Pre-Binarization Table Surface Masking** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), lines 322–325) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -25,7 +25,7 @@ Run from the repository root:
 swift build
 swift test
 ```
-All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **111 tests across 19 suites**, passing with 0 warnings).
+All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **119 tests across 20 suites**, passing with 0 warnings).
 
 ### 1.3 Notes on Git-Ignored & External Items
 - **Git Remote**: Check `git remote -v`. If no remote is configured when migrating, either push `main` to a new remote (`git remote add origin <url> && git push -u origin main`) or transfer via `git bundle create scantailor.bundle --all`.
@@ -45,22 +45,22 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 
 | Layer / Target | Responsibility |
 | :--- | :--- |
-| [`ScanTailorContracts`](../Sources/ScanTailorContracts) | Pure `Sendable` geometry (`Point2D`, `Rect2D`, `Size2D`, `AffineTransform2D`, `DewarpGrid`), raster buffers (`GrayscaleBuffer`, MSB 64-bit word-packed `BinaryBitmap`, `IntegralBuffer`), OCR/confidence models, and backend protocols (`PDFSourceReader`, `ComputeAccelerator`, `OCREngine`, `PDFDocumentWriter: ~Copyable`). |
-| [`ScanTailorCore`](../Sources/ScanTailorCore) | Portable vision & layout algorithms: `FontScaleAnalyzer`, `PhysicalSizeSpec`, `DocumentQuadDetector`, `PageSplitEstimator`, `SkewEstimator`, `ContentBoxDetector`, `CylindricalDewarpSolver` + `TextLineTracer`, `AdaptiveBinarizer` (Sauvola/Wolf/Otsu), `BackgroundNormalizer`, `BorderAndSpeckleCleaner`, `MarginHarmonizer` (3-tier placement), `PublicationMargins`, binary morphology, seed-fill, and connected components. |
-| [`ScanTailorPipeline`](../Sources/ScanTailorPipeline) | 3-pass [`BookPipelineCoordinator`](../Sources/ScanTailorPipeline/BookPipelineCoordinator.swift) (pre-raster font-scale calibration; Pass 1: 600 DPI per-page analysis; Pass 2: book-wide statistical harmonization & IQR outlier filtering; Pass 3: 600 -> 300 DPI render, OCR, post-calibration typography telemetry, & PDF assembly), `BookProcessingManifest`, and polyglot [`DualOCREngine`](../Sources/ScanTailorPipeline/OCR/DualOCREngine.swift). |
+| [`ScanTailorContracts`](../Sources/ScanTailorContracts) | Pure `Sendable` geometry (`Point2D`, `Rect2D`, `Size2D`, `AffineTransform2D`, `Homography2D`, `DewarpGrid`), raster buffers (`GrayscaleBuffer`, MSB 64-bit word-packed `BinaryBitmap`, `IntegralBuffer`), OCR/confidence models, and backend protocols (`PDFSourceReader`, `ComputeAccelerator`, `OCREngine`, `PDFDocumentWriter: ~Copyable`). |
+| [`ScanTailorCore`](../Sources/ScanTailorCore) | Portable vision & layout algorithms: `FontScaleAnalyzer`, `PhysicalSizeSpec`, `DocumentQuadDetector`, `PerspectiveRectifier`, `PageSplitEstimator`, `SkewEstimator`, `ContentBoxDetector`, `CylindricalDewarpSolver` + `TextLineTracer`, `AdaptiveBinarizer` (Sauvola/Wolf/Otsu), `BackgroundNormalizer`, `BorderAndSpeckleCleaner`, `MarginHarmonizer` (3-tier placement), `PublicationMargins`, binary morphology, seed-fill, and connected components. |
+| [`ScanTailorPipeline`](../Sources/ScanTailorPipeline) | 3-pass [`BookPipelineCoordinator`](../Sources/ScanTailorPipeline/BookPipelineCoordinator.swift) (pre-raster font-scale calibration; Pass 1: perspective rectification + 600 DPI per-page analysis; Pass 2: book-wide statistical harmonization & IQR outlier filtering; Pass 3: 600 -> 300 DPI render, OCR, post-calibration typography telemetry, & PDF assembly), `BookProcessingManifest` (incl. per-source-page `SourcePageGeometryRecord`s), and polyglot [`DualOCREngine`](../Sources/ScanTailorPipeline/OCR/DualOCREngine.swift). |
 | [`ScanTailorAppleBackend`](../Sources/ScanTailorAppleBackend) / [`ScanTailorPortableBackend`](../Sources/ScanTailorPortableBackend) / [`ScanTailorTesseractBackend`](../Sources/ScanTailorTesseractBackend) | `MetalComputeAccelerator` (MPS/Metal + vImage), `ApplePDFSourceReader`, `AppleVisionOCREngine`, `ApplePDFDocumentWriter` (1-bit CCITT Group 4 + invisible text layer), `DiagnosticOverlayRenderer`, pure-Swift SIMD `PortableComputeAccelerator`, and `TesseractOCREngine` (`CTesseract` + Leptonica C API). |
 | [`ScanTailorCLI`](../Sources/ScanTailorCLI) | `scantailor-cli` (`process`, `inspect`), JSON manifest persistence/overrides, typography & scale telemetry reporting, and low-confidence diagnostic overlay generation. |
 
 ### 2.2 Completed Phases & Roadmap to `v1.0.0`
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
   - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **Completed**
-  - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **In progress (`5.1.1` Completed; `5.1.2` Next)**
+  - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **In progress (Step 5.1 Completed; `5.2.1` Next)**
   - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — Pending
   - **Phase 7**: Verification & Final `v1.0.0` Release (`7.1.1` – `7.2.2`) — Pending
 
 ---
 
-## 3. Completed Substeps (`4.1.1`–`5.1.1`)
+## 3. Completed Substeps (`4.1.1`–`5.1.2`)
 
 ### 3.1 Recently Completed: Substep 4.1.1 (`FontScaleAnalyzer`)
 Implemented automatic font-scale heuristic, median glyph height analyzer, and pre-raster camera-wrapper scale rescue across 4 source/CLI/test layers:
@@ -135,7 +135,7 @@ Implemented dual-pass background quotient flattening and multiplicative anti-sta
    - [`Tests/ScanTailorCoreTests/DualPassIlluminationTests.swift`](../Tests/ScanTailorCoreTests/DualPassIlluminationTests.swift) (5 tests). These cover Simpson glare/gradient stroke-weight uniformity (Wolf-Jolion & Sauvola), dense multi-column Pass 2 recovery, the steep spine shadow (plus a direct linear-reflection invariant check), the bleed-through/grain noise gate, and Codable/edge cases/`BookPipelineCoordinator` Pass 1 uniformity.
 
 ### 3.6 Recently Completed: Substep 5.1.1 (`DocumentQuadDetector` — Paper Edge & Contrast Boundary Detection)
-A standalone 4-corner document quadrangle estimator in [`Sources/ScanTailorCore/Geometry/DocumentQuadDetector.swift`](../Sources/ScanTailorCore/Geometry/DocumentQuadDetector.swift), with pure-Swift kernels in [`QuadDetectionKernels.swift`](../Sources/ScanTailorCore/Geometry/QuadDetectionKernels.swift). It is **not yet wired into `BookPipelineCoordinator` or the manifest**; that happens in 5.1.2 with the homography.
+A standalone 4-corner document quadrangle estimator in [`Sources/ScanTailorCore/Geometry/DocumentQuadDetector.swift`](../Sources/ScanTailorCore/Geometry/DocumentQuadDetector.swift), with pure-Swift kernels in [`QuadDetectionKernels.swift`](../Sources/ScanTailorCore/Geometry/QuadDetectionKernels.swift). It is wired into `BookPipelineCoordinator` and the manifest by Substep 5.1.2 (§3.7).
 1. **Public API** (`Sendable`, `Equatable`, `Codable`, with `decodeIfPresent` defaults):
    - `DocumentQuad`: TL/TR/BR/BL corners in continuous source pixels, plus `corners`, `area`, `boundingBox`, `contains(_:)` and `fullFrame(width:height:)`.
    - `DocumentQuadDetection`: `outcome` (`detected` / `fullFrame` / `rejected`), `quad` (full frame unless detected), `candidateQuad`, `confidence`, per-side `sideSupport` and `sideResidualPixels` (`SideMetrics` struct), `boundaryContrast`, `areaFraction`, and `flags` (`occluded:<side>`, `bentSide:<side>`, `lowContrastDesk`, `cornerFallback:<corner>`, `noDeskDetected`, `rejected:<reason>`).
@@ -149,26 +149,40 @@ A standalone 4-corner document quadrangle estimator in [`Sources/ScanTailorCore/
    - Validation: convexity, corner angles within 90° ± 35°, side proportions, area, side support, contrast, and a geometric-mean confidence. A frame-filling region counts as `fullFrame` only if the 1–3 % border ring is raw paper-class (≥ 80 %); otherwise it is rejected, which is how a wood-only image is rejected.
 3. **Accuracy on synthetic fixtures** (1800×1350, 3×3 PSF, noise σ = 3): corner errors ≤ 0.07 px for the wood desk, low-contrast laminate (contrast 35, confidence 0.90), thumb occlusion of the left side and bottom-left corner, the bent open-book spread, and the 0.5× rescale.
 4. **Debug-build performance**: blur, downsample and morphology use pointer loops (the Gaussian went from 4.0 s to 0.15 s per σ = 4 pass); the suite runs in about 16 s.
-5. **Tests**: [`Tests/ScanTailorCoreTests/DocumentQuadDetectorTests.swift`](../Tests/ScanTailorCoreTests/DocumentQuadDetectorTests.swift) (8 tests) covering the wooden desk, low-contrast desk, partial occlusion, calibrated no-desk scan, wood-only and plain-grey rejection, bent open-book spread, scale invariance/determinism, and Codable/degenerate inputs. `111/111` pass across 19 suites, 0 warnings on a clean build.
+5. **Tests**: [`Tests/ScanTailorCoreTests/DocumentQuadDetectorTests.swift`](../Tests/ScanTailorCoreTests/DocumentQuadDetectorTests.swift) (8 tests) covering the wooden desk, low-contrast desk, partial occlusion, calibrated no-desk scan, wood-only and plain-grey rejection, bent open-book spread, scale invariance/determinism, and Codable/degenerate inputs. `111/111` passed across 19 suites at the time, 0 warnings on a clean build.
+
+### 3.7 Recently Completed: Substep 5.1.2 (Perspective Rectification & Sheet Cropping)
+Release Criterion 9 is now met end to end: camera keystoning is removed and the desk is cropped away before spread splitting, deskew and dewarp.
+1. **`Homography2D`** ([`Sources/ScanTailorContracts/Geometry/Homography2D.swift`](../Sources/ScanTailorContracts/Geometry/Homography2D.swift)): row-major 3×3, normalized to `m8 = 1`, `Codable` (validated on decode). `init?(mapping:to:)` is a Hartley-normalized DLT (exact for 4 points, least squares for more; `nil` for collinear triples or singular systems). Also `init(matrix:) throws(GeometryError)`, `init(_ affine:)`, `identity`, `transform(_:) -> Point2D?` (`nil` on the horizon line), `inverted()`, `concatenating(_:)`, `isAffine`.
+2. **`PerspectiveRectifier`** ([`Sources/ScanTailorCore/Geometry/PerspectiveRectifier.swift`](../Sources/ScanTailorCore/Geometry/PerspectiveRectifier.swift)):
+   - `estimateAspectRatio(of:imageSize:)`: Zhang–He whiteboard method (principal point = image center). The focal length is solved from the two vanishing directions when plausible (0.3–4 × diagonal); otherwise (parallelogram, one-axis trapezoid) an assumed `0.8 × diagonal` is used.
+   - `plan(for: DocumentQuadDetection, …)` returns `nil` for `fullFrame`/`rejected` (passthrough). `plan(for: DocumentQuad, …)` refuses non-convex/anticlockwise quads. With a known `--page-size`, an aspect within 15 % of the single-page or two-page-spread aspect snaps to it (`aspectSource = .pageSize`).
+   - Output size: no quad edge is downsampled; total pixels capped at 1.25 × source. Quad corners map exactly to the output corners (no inset; border shadows are left to Phase 5.2).
+   - `rectify(_:plan:)` / `resample(_:inverse:outputSize:)`: pure-Swift bilinear, incremental per-row homography, pixel-center convention, out-of-source samples = 255, DPI preserved. No `ComputeAccelerator` requirement yet.
+   - `RectificationPlan` (`Codable`): `quad`, `aspectRatio`, `aspectSource` (`perspective` / `assumedFocalLength` / `pageSize`), `focalLengthPixels`, `outputSize`, `sourceToRectified`, `rectifiedToSource`.
+3. **Pipeline** ([`BookPipelineCoordinator.swift`](../Sources/ScanTailorPipeline/BookPipelineCoordinator.swift), [`SourcePageGeometry.swift`](../Sources/ScanTailorPipeline/SourcePageGeometry.swift)): step 0 of the Pass-1 loop, after font-scale resampling and before `PageSplitEstimator`. New `Configuration` fields: `enablePerspectiveRectification` (default `true`), `quadDetectorConfiguration`, `rectifierConfiguration`. `fullFrame`/`rejected`/disabled/degenerate plans pass the page through byte-identical. The font-scale probe pass still sees unrectified pages.
+4. **Manifest & overrides**: `BookProcessingManifest.sourcePageGeometry: [SourcePageGeometryRecord]` (`decodeIfPresent`, so older manifests load) with `sourcePageIndex`, `rasterSize`, `detection?`, `rectified`, `plan?`, `manualOverride?`. `SourcePageGeometryOverride` (keyed by **source** page, because rectification precedes the split) has `overrideQuad` (bypasses detection, applies even when automatic rectification is off, rescaled by the `rasterSize` ratio when the raster changes) and `disableRectification`. Overrides are applied through the existing `--manifest` re-run path and carried forward.
+5. **CLI**: `--no-perspective` (alias `--no-quad`); the manifest summary prints `Perspective Rectification: N rectified | N full-frame | N rejected | N manual override(s)`.
+6. **Accuracy & performance** (keystone fixture: 1400×1050, pitch 24°, yaw −15°, roll 4°, wood desk): the detected plan maps the true 5×5 page grid within 1 px, aspect error 0.03 %, text lines straight (RMS ≤ 0.5 px). Exact pinhole projections recover aspect and focal length to 1e-6. Debug build: detection ≈ 0.5 s on a 5100×6600 page; rectification ≈ 0.05 s for 586×879.
+7. **Tests**: [`Tests/ScanTailorCoreTests/PerspectiveRectificationTests.swift`](../Tests/ScanTailorCoreTests/PerspectiveRectificationTests.swift) (8 tests): homography DLT, resampler identity/bounds, aspect recovery (4 poses + assumed focal + page-size snap), keystone round trip, straight lines, passthrough (pipeline output identical with rectification on/off on a flatbed scan), pipeline integration (desk-free 3 % border band), and manifest overrides/legacy decoding/CLI flag. `119/119` pass across 20 suites, 0 warnings on a clean build.
 
 ---
 
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 5, Substep 5.1.2**, copy and provide the following prompt:
+To begin **Phase 5, Substep 5.2.1**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 5.1.2 — Perspective Rectification & Sheet Cropping.
+We are resuming ScanTailorReborn on Substep 5.2.1 — Pre-Binarization Table Surface Masking.
 
 1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 2–3, especially 3.6 on `DocumentQuadDetector`) and `docs/WHITE_PAPER.md` Phase 5 (lines 309–330) plus Release Criterion 9.
+2. Review `docs/HANDOFF.md` (Sections 2–3, especially 3.6–3.7 on `DocumentQuadDetector` and `PerspectiveRectifier`) and `docs/WHITE_PAPER.md` Phase 5 (lines 309–330) plus Release Criterion 1.
 3. Propose a design covering:
-   - a `Homography2D` (DLT from the detected quad to a rectangle whose aspect is estimated from the quad, or from `PhysicalSizeSpec` when known), with inverse mapping;
-   - a bilinear rectifying resampler for `GrayscaleBuffer`;
-   - how rectification is chained ahead of `PageSplitEstimator`, deskew, and dewarp in `BookPipelineCoordinator`, including `fullFrame`/`rejected` passthrough with no resampling;
-   - manifest/CLI telemetry and overrides for the quad;
-   - tests (keystone round-trip accuracy, straight-line preservation, aspect recovery, passthrough, pipeline integration).
+   - the desk/background mask: residual desk after rectification (bent-spread gutter wedges, rounding at the crop edge), and pages that were not rectified (`rejected` or low-confidence detections, `--no-perspective`);
+   - how the mask is applied before `BackgroundNormalizer` closing and `AdaptiveBinarizer` thresholding (filled as paper white vs. excluded from local statistics), and how it travels through split, deskew and dewarp;
+   - manifest telemetry and any override;
+   - tests (dark wooden desk never forms macro-clusters, text near the paper edge survives, passthrough on flatbed scans, pipeline integration).
    Pause for approval before implementing.
 4. After approval, implement with tests, run `swift test` (sandboxed first, then with bypass if needed), and confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 5.2.1.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 5.2.2.
 ```

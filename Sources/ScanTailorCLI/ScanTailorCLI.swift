@@ -78,6 +78,7 @@ public struct ScanTailorCLI {
         public var excludedPages: Set<Int> = []
         public var firstPageSide: MarginHarmonizer.PageSide = .recto
         public var enableDewarp: Bool = true
+        public var enablePerspectiveRectification: Bool = true
         public var enableOCR: Bool = true
         public var ocrEngineType: OCREngineType? = nil
         public var ocrLanguages: [String] = ["en-US"]
@@ -130,6 +131,7 @@ public struct ScanTailorCLI {
         var excludedPages: Set<Int> = []
         var firstPageSide: MarginHarmonizer.PageSide = .recto
         var enableDewarp = true
+        var enablePerspective = true
         var enableOCR = true
         var ocrEngineType: OCREngineType? = nil
         var ocrLanguages: [String] = ["en-US"]
@@ -285,6 +287,9 @@ public struct ScanTailorCLI {
             case "--no-dewarp":
                 enableDewarp = false
                 i += 1
+            case "--no-perspective", "--no-quad":
+                enablePerspective = false
+                i += 1
             case "--no-auto-prune", "--no-blank-pruning":
                 autoPruneBlankPages = false
                 i += 1
@@ -333,6 +338,7 @@ public struct ScanTailorCLI {
         opts.excludedPages = excludedPages
         opts.firstPageSide = firstPageSide
         opts.enableDewarp = enableDewarp
+        opts.enablePerspectiveRectification = enablePerspective
         opts.enableOCR = enableOCR
         opts.ocrEngineType = ocrEngineType
         opts.ocrLanguages = ocrLanguages
@@ -432,7 +438,8 @@ public struct ScanTailorCLI {
             firstPageSide: options.firstPageSide,
             pageRange: options.pageRange,
             excludedPages: options.excludedPages,
-            ocrLanguages: options.ocrLanguages
+            ocrLanguages: options.ocrLanguages,
+            enablePerspectiveRectification: options.enablePerspectiveRectification
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -558,6 +565,13 @@ public struct ScanTailorCLI {
         if !overrideParts.isEmpty {
             lines.append("Dimension Overrides: \(overrideParts.joined(separator: " | "))")
         }
+        if !manifest.sourcePageGeometry.isEmpty {
+            let rectified = manifest.sourcePageGeometry.filter(\.rectified).count
+            let fullFrame = manifest.sourcePageGeometry.filter { $0.detection?.outcome == .fullFrame }.count
+            let rejected = manifest.sourcePageGeometry.filter { $0.detection?.outcome == .rejected }.count
+            let manual = manifest.sourcePageGeometry.filter { $0.manualOverride != nil }.count
+            lines.append("Perspective Rectification: \(rectified) rectified | \(fullFrame) full-frame | \(rejected) rejected | \(manual) manual override(s)")
+        }
         if manifest.physicalScaleAmbiguous {
             lines.append("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true) — escalate to user for --page-size (octavo, trade-paperback, a5, a4, letter) or --input-dpi")
         }
@@ -630,6 +644,7 @@ public struct ScanTailorCLI {
       --binarize <method>          Adaptive thresholding: wolf (default) or sauvola
       --no-auto-prune              Disable automatic pruning of blank sub-page slices
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping
+      --no-perspective             Disable document-quad detection and perspective rectification (alias --no-quad)
       --no-ocr                     Disable OCR searchable text layer
       --ocr-engine <engine>        OCR engine: apple (default on macOS), tesseract, dual
       --ocr-languages <langs>      Comma or plus-separated language codes, e.g. "grc+lat", "en-US,de-DE", "frk"

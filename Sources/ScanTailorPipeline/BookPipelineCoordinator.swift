@@ -151,6 +151,9 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     public var contentBoxSize: PhysicalSizeSpec?
     /// `true` when physical scale could not be determined automatically with high confidence and estimated single-page height exceeded `14"`, requiring AI agent-to-user escalation.
     public var physicalScaleAmbiguous: Bool
+    /// Per-source-page document quadrangle detection and perspective rectification records
+    /// (empty for manifests written before Substep 5.1.2).
+    public var sourcePageGeometry: [SourcePageGeometryRecord]
 
     public init(
         processingDPI: Int,
@@ -167,7 +170,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         inputDPI: Int? = nil,
         pageSize: PhysicalSizeSpec? = nil,
         contentBoxSize: PhysicalSizeSpec? = nil,
-        physicalScaleAmbiguous: Bool = false
+        physicalScaleAmbiguous: Bool = false,
+        sourcePageGeometry: [SourcePageGeometryRecord] = []
     ) {
         self.processingDPI = processingDPI
         self.outputDPI = outputDPI
@@ -184,6 +188,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.pageSize = pageSize
         self.contentBoxSize = contentBoxSize
         self.physicalScaleAmbiguous = physicalScaleAmbiguous
+        self.sourcePageGeometry = sourcePageGeometry
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -202,6 +207,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case pageSize
         case contentBoxSize
         case physicalScaleAmbiguous
+        case sourcePageGeometry
     }
 
     public init(from decoder: Decoder) throws {
@@ -221,11 +227,13 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.pageSize = try container.decodeIfPresent(PhysicalSizeSpec.self, forKey: .pageSize)
         self.contentBoxSize = try container.decodeIfPresent(PhysicalSizeSpec.self, forKey: .contentBoxSize)
         self.physicalScaleAmbiguous = try container.decodeIfPresent(Bool.self, forKey: .physicalScaleAmbiguous) ?? false
+        self.sourcePageGeometry = try container.decodeIfPresent([SourcePageGeometryRecord].self, forKey: .sourcePageGeometry) ?? []
     }
 }
 
 /// Coordinates the 3-pass automated book processing pipeline:
-/// - **Pass 1**: Source rasterization (600 DPI), dual-page spread splitting, multi-scale deskew,
+/// - **Pass 1**: Source rasterization (600 DPI), document quadrangle detection and perspective
+///   rectification (desk excision), dual-page spread splitting, multi-scale deskew,
 ///   3D cubic-sheet dewarping (with flat-page auto-bypass), illumination normalization, adaptive
 ///   binarization, border/speckle cleanup, and initial content box detection.
 /// - **Pass 2**: Book-wide statistical outlier rejection and 3-tier margin harmonization
@@ -285,6 +293,13 @@ public struct BookPipelineCoordinator: Sendable {
         public var enableAutomaticFontScaleCalibration: Bool
         /// Configuration for automatic typographic font-scale analysis and camera-wrapper DPI deduction.
         public var fontScaleConfiguration: FontScaleAnalyzer.Configuration
+        /// Whether to detect the document quadrangle and remove camera perspective before spread
+        /// splitting (default: `true`). `fullFrame`/`rejected` detections always pass through.
+        public var enablePerspectiveRectification: Bool
+        /// Document quadrangle detector configuration.
+        public var quadDetectorConfiguration: DocumentQuadDetector.Configuration
+        /// Perspective rectifier configuration.
+        public var rectifierConfiguration: PerspectiveRectifier.Configuration
 
         public init(
             processingDPI: Int = 600,
@@ -311,7 +326,10 @@ public struct BookPipelineCoordinator: Sendable {
             ocrLanguages: [String] = ["en-US"],
             lowConfidenceThreshold: Double = 0.75,
             enableAutomaticFontScaleCalibration: Bool = true,
-            fontScaleConfiguration: FontScaleAnalyzer.Configuration = FontScaleAnalyzer.Configuration()
+            fontScaleConfiguration: FontScaleAnalyzer.Configuration = FontScaleAnalyzer.Configuration(),
+            enablePerspectiveRectification: Bool = true,
+            quadDetectorConfiguration: DocumentQuadDetector.Configuration = DocumentQuadDetector.Configuration(),
+            rectifierConfiguration: PerspectiveRectifier.Configuration = PerspectiveRectifier.Configuration()
         ) {
             self.processingDPI = max(150, processingDPI)
             self.outputDPI = max(72, outputDPI)
@@ -340,6 +358,9 @@ public struct BookPipelineCoordinator: Sendable {
             self.lowConfidenceThreshold = min(max(0.0, lowConfidenceThreshold), 1.0)
             self.enableAutomaticFontScaleCalibration = enableAutomaticFontScaleCalibration
             self.fontScaleConfiguration = fontScaleConfiguration
+            self.enablePerspectiveRectification = enablePerspectiveRectification
+            self.quadDetectorConfiguration = quadDetectorConfiguration
+            self.rectifierConfiguration = rectifierConfiguration
         }
     }
 
@@ -990,17 +1011,32 @@ public struct BookPipelineCoordinator: Sendable {
             }
         }
 
-        // --- PASS 1: Page Split, Deskew, 3D Cubic-Sheet Dewarp, 600 DPI Binarization & Content Box Detection ---
+        // --- PASS 1: Perspective Rectification, Page Split, Deskew, 3D Cubic-Sheet Dewarp, 600 DPI Binarization & Content Box Detection ---
         var sourceSplits: [PageSplitDecision] = []
         sourceSplits.reserveCapacity(sourcePages.count)
         var pass1Pages: [Pass1Page] = []
         var prunedPages: [PrunedPageRecord] = []
+        var sourceGeometry: [SourcePageGeometryRecord] = []
+        sourceGeometry.reserveCapacity(sourcePages.count)
+        var priorGeometryBySourceIndex: [Int: SourcePageGeometryRecord] = [:]
+        for record in existingManifest?.sourcePageGeometry ?? [] {
+            priorGeometryBySourceIndex[record.sourcePageIndex] = record
+        }
 
         let dpiScale = Double(configuration.processingDPI) / 600.0
         let minSagPixels = configuration.minDewarpSagPixelsAt600DPI * dpiScale
         let effectiveGutterTrimWidth = max(0, Int((Double(configuration.gutterTrimWidth) * dpiScale).rounded()))
 
-        for (srcIdx, rawScan) in sourcePages.enumerated() {
+        for (srcIdx, unrectifiedScan) in sourcePages.enumerated() {
+            // 0. Document quadrangle detection & perspective rectification (desk excision).
+            let (rawScan, geometryRecord) = rectifySourcePage(
+                unrectifiedScan,
+                sourcePageIndex: srcIdx,
+                priorRecord: priorGeometryBySourceIndex[srcIdx],
+                targetPageSize: effectivePageSize
+            )
+            sourceGeometry.append(geometryRecord)
+
             let splitDecision = PageSplitEstimator.estimateSplit(
                 in: rawScan,
                 mode: configuration.splitMode
@@ -1398,7 +1434,8 @@ public struct BookPipelineCoordinator: Sendable {
             inputDPI: effectiveInputDPI,
             pageSize: effectivePageSize,
             contentBoxSize: effectiveContentBoxSize,
-            physicalScaleAmbiguous: physicalScaleAmbiguous
+            physicalScaleAmbiguous: physicalScaleAmbiguous,
+            sourcePageGeometry: sourceGeometry
         )
 
         return PipelineOutput(
