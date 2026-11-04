@@ -601,6 +601,15 @@ public struct ScanTailorCLI {
             let idle = fallbackRecords.count - excised - rejected
             lines.append("Border Fallback: \(excised) excised | \(idle) engaged, nothing found | \(rejected) rejected")
         }
+        if let headerModel = manifest.runningHeaderModel {
+            let anchors = manifest.pages.compactMap(\.topAnchor)
+            let sides = headerModel.sides
+                .map { "\($0.side.rawValue) \($0.headerPageCount)/\($0.pageCount)" }
+                .joined(separator: " · ")
+            let bodyAnchored = anchors.filter { $0.kind == .bodyBaseline }.count
+            let unanchored = anchors.filter { $0.kind == .none }.count
+            lines.append("Running Headers: \(sides.isEmpty ? "no pages" : sides) | \(bodyAnchored) body-anchored | \(unanchored) none")
+        }
         if manifest.physicalScaleAmbiguous {
             lines.append("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true) — escalate to user for --page-size (octavo, trade-paperback, a5, a4, letter) or --input-dpi")
         }

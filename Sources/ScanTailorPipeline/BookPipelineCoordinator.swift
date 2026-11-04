@@ -14,15 +14,19 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
     public var overrideDestinationOrigin: Point2I?
     /// Per-page policy for the macro-cluster border fallback (`nil` is `.automatic`).
     public var borderFallback: BorderFallbackPolicy?
+    /// Per-page running-header policy (`nil` is `.automatic`).
+    public var runningHeader: RunningHeaderPolicy?
 
     public init(
         overrideSkewDegrees: Double? = nil,
         disableDewarp: Bool? = nil,
         overrideContentBox: Rect2I? = nil,
         overrideDestinationOrigin: Point2I? = nil,
-        borderFallback: BorderFallbackPolicy? = nil
+        borderFallback: BorderFallbackPolicy? = nil,
+        runningHeader: RunningHeaderPolicy? = nil
     ) {
         self.borderFallback = borderFallback
+        self.runningHeader = runningHeader
         self.overrideSkewDegrees = overrideSkewDegrees
         self.disableDewarp = disableDewarp
         self.overrideContentBox = overrideContentBox
@@ -64,6 +68,9 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
     public var manualOverride: PageManualOverride?
     /// Macro-cluster border fallback telemetry (`nil` when the fallback was not engaged).
     public var borderFallback: MacroBorderResult?
+    /// Running header / first-baseline top anchor (`nil` when detection is disabled or for
+    /// manifests written before Substep 6.1.1).
+    public var topAnchor: PageTopAnchor?
 
     public init(
         outputPageIndex: Int,
@@ -81,9 +88,11 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
         overallConfidence: Double,
         flaggedLowConfidence: Bool,
         manualOverride: PageManualOverride? = nil,
-        borderFallback: MacroBorderResult? = nil
+        borderFallback: MacroBorderResult? = nil,
+        topAnchor: PageTopAnchor? = nil
     ) {
         self.borderFallback = borderFallback
+        self.topAnchor = topAnchor
         self.outputPageIndex = outputPageIndex
         self.sourcePageIndex = sourcePageIndex
         self.splitSide = splitSide
@@ -162,6 +171,9 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     /// Per-source-page document quadrangle detection and perspective rectification records
     /// (empty for manifests written before Substep 5.1.2).
     public var sourcePageGeometry: [SourcePageGeometryRecord]
+    /// Book-wide running-header statistics (`nil` when detection is disabled or for manifests
+    /// written before Substep 6.1.1).
+    public var runningHeaderModel: RunningHeaderModel?
 
     public init(
         processingDPI: Int,
@@ -179,8 +191,10 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         pageSize: PhysicalSizeSpec? = nil,
         contentBoxSize: PhysicalSizeSpec? = nil,
         physicalScaleAmbiguous: Bool = false,
-        sourcePageGeometry: [SourcePageGeometryRecord] = []
+        sourcePageGeometry: [SourcePageGeometryRecord] = [],
+        runningHeaderModel: RunningHeaderModel? = nil
     ) {
+        self.runningHeaderModel = runningHeaderModel
         self.processingDPI = processingDPI
         self.outputDPI = outputDPI
         self.canonicalCanvasSizeAtProcessingDPI = canonicalCanvasSizeAtProcessingDPI
@@ -216,6 +230,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case contentBoxSize
         case physicalScaleAmbiguous
         case sourcePageGeometry
+        case runningHeaderModel
     }
 
     public init(from decoder: Decoder) throws {
@@ -236,6 +251,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.contentBoxSize = try container.decodeIfPresent(PhysicalSizeSpec.self, forKey: .contentBoxSize)
         self.physicalScaleAmbiguous = try container.decodeIfPresent(Bool.self, forKey: .physicalScaleAmbiguous) ?? false
         self.sourcePageGeometry = try container.decodeIfPresent([SourcePageGeometryRecord].self, forKey: .sourcePageGeometry) ?? []
+        self.runningHeaderModel = try container.decodeIfPresent(RunningHeaderModel.self, forKey: .runningHeaderModel)
     }
 }
 
@@ -320,6 +336,11 @@ public struct BookPipelineCoordinator: Sendable {
         /// Quadrangle detections below this confidence count as marginal and engage the border
         /// fallback (default: `0.70`).
         public var borderFallbackMarginalConfidence: Double
+        /// Whether to detect running headers, folios, and first body baselines and record them as
+        /// per-page top anchors (default: `true`). Detection is telemetry only; it changes no pixels.
+        public var enableRunningHeaderDetection: Bool
+        /// Running-header detector configuration.
+        public var runningHeaderConfiguration: RunningHeaderDetector.Configuration
 
         public init(
             processingDPI: Int = 600,
@@ -353,8 +374,12 @@ public struct BookPipelineCoordinator: Sendable {
             enableDeskMasking: Bool = true,
             deskMaskerConfiguration: PaperRegionMasker.Configuration = PaperRegionMasker.Configuration(),
             enableBorderFallback: Bool = true,
-            borderFallbackMarginalConfidence: Double = 0.70
+            borderFallbackMarginalConfidence: Double = 0.70,
+            enableRunningHeaderDetection: Bool = true,
+            runningHeaderConfiguration: RunningHeaderDetector.Configuration = RunningHeaderDetector.Configuration()
         ) {
+            self.enableRunningHeaderDetection = enableRunningHeaderDetection
+            self.runningHeaderConfiguration = runningHeaderConfiguration
             self.enableBorderFallback = enableBorderFallback
             self.borderFallbackMarginalConfidence = min(1.0, max(0.0, borderFallbackMarginalConfidence))
             self.processingDPI = max(150, processingDPI)
@@ -1265,6 +1290,28 @@ public struct BookPipelineCoordinator: Sendable {
             }
         }
 
+        // --- Running headers & top baselines (telemetry only; changes no pixels) ---
+        var topAnchors: [PageTopAnchor?] = Array(repeating: nil, count: pass1Pages.count)
+        var runningHeaderModel: RunningHeaderModel? = nil
+        if configuration.enableRunningHeaderDetection && !pass1Pages.isEmpty {
+            let headerDetector = RunningHeaderDetector(configuration: configuration.runningHeaderConfiguration)
+            let profiles = pass1Pages.map { p in
+                headerDetector.profilePage(
+                    p.cleanedBitmap,
+                    region: p.manualOverride?.overrideContentBox ?? p.detection.contentBox,
+                    pageIndex: p.outputPageIndex,
+                    side: p.bookSide
+                )
+            }
+            var policies: [Int: RunningHeaderPolicy] = [:]
+            for p in pass1Pages {
+                if let policy = p.manualOverride?.runningHeader { policies[p.outputPageIndex] = policy }
+            }
+            let analysis = headerDetector.analyzeBook(profiles, policies: policies)
+            topAnchors = analysis.anchors.map(Optional.some)
+            runningHeaderModel = analysis.model
+        }
+
         // --- PASS 2: Book-Wide Outlier Rejection & 3-Tier Margin Harmonization ---
         let harmonizerInputs = pass1Pages.map { p in
             MarginHarmonizer.PageInput(
@@ -1419,7 +1466,8 @@ public struct BookPipelineCoordinator: Sendable {
                     overallConfidence: overallConfidence,
                     flaggedLowConfidence: flagged,
                     manualOverride: p1.manualOverride,
-                    borderFallback: p1.borderFallback
+                    borderFallback: p1.borderFallback,
+                    topAnchor: topAnchors[idx]
                 )
             )
             outputBitmaps.append(finalBitmap)
@@ -1479,7 +1527,8 @@ public struct BookPipelineCoordinator: Sendable {
             pageSize: effectivePageSize,
             contentBoxSize: effectiveContentBoxSize,
             physicalScaleAmbiguous: physicalScaleAmbiguous,
-            sourcePageGeometry: sourceGeometry
+            sourcePageGeometry: sourceGeometry,
+            runningHeaderModel: runningHeaderModel
         )
 
         return PipelineOutput(

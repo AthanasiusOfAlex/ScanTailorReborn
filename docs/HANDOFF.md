@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-04  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 5, Step 5.2, **Phase 5 is complete** (Substep 5.2.2 done). Next: **Substep 6.1.1 — Running Header & Top Baseline Detection** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
+**Current Active Milestone**: Phase 6, Step 6.1, Substep 6.1.1 done. Next: **Substep 6.1.2 — Vertical Page Registration Anchor** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -25,7 +25,7 @@ Run from the repository root:
 swift build
 swift test
 ```
-All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **133 tests across 22 suites**, passing with 0 warnings).
+All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **140 tests across 23 suites**, passing with 0 warnings).
 
 ### 1.3 Notes on Git-Ignored & External Items
 - **Git Remote**: Check `git remote -v`. If no remote is configured when migrating, either push `main` to a new remote (`git remote add origin <url> && git push -u origin main`) or transfer via `git bundle create scantailor.bundle --all`.
@@ -46,7 +46,7 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 | Layer / Target | Responsibility |
 | :--- | :--- |
 | [`ScanTailorContracts`](../Sources/ScanTailorContracts) | Pure `Sendable` geometry (`Point2D`, `Rect2D`, `Size2D`, `AffineTransform2D`, `Homography2D`, `DewarpGrid`), raster buffers (`GrayscaleBuffer`, MSB 64-bit word-packed `BinaryBitmap`, `IntegralBuffer`), OCR/confidence models, and backend protocols (`PDFSourceReader`, `ComputeAccelerator`, `OCREngine`, `PDFDocumentWriter: ~Copyable`). |
-| [`ScanTailorCore`](../Sources/ScanTailorCore) | Portable vision & layout algorithms: `FontScaleAnalyzer`, `PhysicalSizeSpec`, `DocumentQuadDetector`, `PerspectiveRectifier`, `PaperRegionMasker`, `PageSplitEstimator`, `SkewEstimator`, `ContentBoxDetector`, `CylindricalDewarpSolver` + `TextLineTracer`, `AdaptiveBinarizer` (Sauvola/Wolf/Otsu), `BackgroundNormalizer`, `BorderAndSpeckleCleaner` (+ macro-cluster border fallback), `MarginHarmonizer` (3-tier placement), `PublicationMargins`, binary morphology, seed-fill, and connected components. |
+| [`ScanTailorCore`](../Sources/ScanTailorCore) | Portable vision & layout algorithms: `FontScaleAnalyzer`, `PhysicalSizeSpec`, `DocumentQuadDetector`, `PerspectiveRectifier`, `PaperRegionMasker`, `PageSplitEstimator`, `SkewEstimator`, `ContentBoxDetector`, `CylindricalDewarpSolver` + `TextLineTracer`, `AdaptiveBinarizer` (Sauvola/Wolf/Otsu), `BackgroundNormalizer`, `BorderAndSpeckleCleaner` (+ macro-cluster border fallback), `RunningHeaderDetector` (running headers, folios, top anchors), `MarginHarmonizer` (3-tier placement), `PublicationMargins`, binary morphology, seed-fill, and connected components. |
 | [`ScanTailorPipeline`](../Sources/ScanTailorPipeline) | 3-pass [`BookPipelineCoordinator`](../Sources/ScanTailorPipeline/BookPipelineCoordinator.swift) (pre-raster font-scale calibration; Pass 1: perspective rectification + 600 DPI per-page analysis; Pass 2: book-wide statistical harmonization & IQR outlier filtering; Pass 3: 600 -> 300 DPI render, OCR, post-calibration typography telemetry, & PDF assembly), `BookProcessingManifest` (incl. per-source-page `SourcePageGeometryRecord`s), and polyglot [`DualOCREngine`](../Sources/ScanTailorPipeline/OCR/DualOCREngine.swift). |
 | [`ScanTailorAppleBackend`](../Sources/ScanTailorAppleBackend) / [`ScanTailorPortableBackend`](../Sources/ScanTailorPortableBackend) / [`ScanTailorTesseractBackend`](../Sources/ScanTailorTesseractBackend) | `MetalComputeAccelerator` (MPS/Metal + vImage), `ApplePDFSourceReader`, `AppleVisionOCREngine`, `ApplePDFDocumentWriter` (1-bit CCITT Group 4 + invisible text layer), `DiagnosticOverlayRenderer`, pure-Swift SIMD `PortableComputeAccelerator`, and `TesseractOCREngine` (`CTesseract` + Leptonica C API). |
 | [`ScanTailorCLI`](../Sources/ScanTailorCLI) | `scantailor-cli` (`process`, `inspect`), JSON manifest persistence/overrides, typography & scale telemetry reporting, and low-confidence diagnostic overlay generation. |
@@ -55,12 +55,12 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
   - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **Completed**
   - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **Completed**
-  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — Pending
+  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1` done)
   - **Phase 7**: Verification & Final `v1.0.0` Release (`7.1.1` – `7.2.2`) — Pending
 
 ---
 
-## 3. Completed Substeps (`4.1.1`–`5.2.2`)
+## 3. Completed Substeps (`4.1.1`–`6.1.1`)
 
 ### 3.1 Recently Completed: Substep 4.1.1 (`FontScaleAnalyzer`)
 Implemented automatic font-scale heuristic, median glyph height analyzer, and pre-raster camera-wrapper scale rescue across 4 source/CLI/test layers:
@@ -193,18 +193,29 @@ Closes Phase 5. Desk that survives rectification and masking in a way the standa
 7. **Known limitations**: a dense, uniform halftone or hatched figure (no blank rows) that touches an outer edge, is 14–35 % deep and ≥ 15 % of the edge, on a *marginal* page, is indistinguishable from grain and would be excised; use `borderFallback: disabled` for that page. The font-scale probe pass still sees unrectified, unmasked pages.
 8. **Pitfall**: when adding a CLI flag in `parseProcessOptions`, every `case` must advance `i`; omitting it makes the parser spin forever (found here, hung the whole test run).
 
+### 3.10 Recently Completed: Substep 6.1.1 (Running Header & Top Baseline Detection)
+Opens Phase 6. Every page now gets a **top anchor**: the running header's baseline when the page carries a recurring header, otherwise the first body baseline (release criterion 4). **Telemetry only — no pixels change**; 6.1.2 consumes the anchors.
+1. **Why**: `ContentBoxDetector` already keeps header/folio clusters inside the content box but never labels them, and Tier 1 pages are aligned by content-box top. A page without a header, or with a header at a different distance, therefore jumps.
+2. **Per-page profile** ([`RunningHeaderDetector.swift`](../Sources/ScanTailorCore/Layout/RunningHeaderDetector.swift), `profilePage`): a word-popcount row ink profile over the content box (override box if set) splits text lines. Bands > 1.7× typical height are split at a near-empty row (≤ 20 % of peak) to separate touching lines; thin, wide, solid bands are **rules** folded into the line above (`hasRule`); accent-sized bands join the nearest line. Each line records bounds, **baseline** (first row below the ≥ 50 %-of-peak core), core height, and ink. Body pitch / core height are medians over lines *below* the top line. The top and bottom lines are split into ink segments at gaps ≥ 2.5 core heights for folio detection.
+3. **Book clustering** (`analyzeBook`): per logical side (`verso`, `recto`, `single`). A top line is a **candidate** when the next baseline is ≥ 1.5 body pitches below it and its core height is 0.35–1.75× body core (taller = `titleLike`). Candidates are clustered mode-seeking on *(offset in pitches, height ratio)* with tolerances 0.35 pitch / 0.20; a cluster confirms running headers with ≥ 3 pages and ≥ 30 % of the side's text pages. Absolute page position is deliberately *not* used (camera captures shift it). Sides with < 3 text pages accept candidates at low confidence (`book:tooFewPages`).
+4. **Folios**: in the header line, the outer-end segment (verso left, recto right, single either) no wider than 4.5 header core heights; a header line that is itself that narrow is a folio-only header. A footer folio is a single narrow segment ≥ 1.5 pitches below the last body line; it is never taken as body.
+5. **Anchor** (`PageTopAnchor`): `kind` (`runningHeader` / `bodyBaseline` / `none`), `anchorY`, `headerBox`, `headerBaselineY`, `folioBox`, `footerFolioBox`, `firstBodyLineTopY`, `firstBodyBaselineY`, `confidence`, `flags` (`header:outOfCluster`, `header:sizeMismatch`, `titleLike`, `sinkage`, `book:tooFewPages`, `override:*`, `noText`). Coordinates are pass-1 page coordinates at processing DPI (after split/deskew/dewarp, before framing) — 6.1.2 must map them through the layout plan.
+6. **Manifest/overrides/CLI**: `PageProcessingRecord.topAnchor`, `BookProcessingManifest.runningHeaderModel` (`RunningHeaderModel.sides`: page/header/footer-folio counts, body pitch and core, cluster center), both `decodeIfPresent`. `PageManualOverride.runningHeader: RunningHeaderPolicy?` (`automatic` / `present` = top line is the header / `absent` = top line is body). Coordinator `Configuration.enableRunningHeaderDetection` (default `true`) + `runningHeaderConfiguration`; no CLI flag (output is unchanged). Summary line `Running Headers: verso H/N · recto H/N | N body-anchored | N none`. Runs between pass 1 and pass 2; geometry only, no OCR.
+7. **Tests**: [`RunningHeaderDetectionTests.swift`](../Tests/ScanTailorCoreTests/RunningHeaderDetectionTests.swift) (7): line profile (baseline/core/pitch ±2 px, blank regions), header rule and touching-line split, 10-page alternating book with ±40 px jitter (headers + outer folios confirmed), chapter opener (`titleLike` + `sinkage`), headerless page and footer folio, scattered section headings forming no cluster, `present`/`absent` overrides + `tooFewPages` + blank page + config clamping, and pipeline integration (anchors recorded, override, **identical output bitmaps with detection off**, JSON round trip, legacy manifest). `140/140` pass across 23 suites, 0 warnings.
+8. **Known limitations**: headers the content-box detector already rejected (gap > 14 % of page height) are out of reach; two-column bodies starting at different heights give a noisy first baseline; a body whose first line is an unusual heading is measured off and simply falls out of the cluster (flagged). Synthetic fixtures only — validate on the real corpus during 6.1.2.
+
 ---
 
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 6, Substep 6.1.1**, copy and provide the following prompt:
+To begin **Phase 6, Substep 6.1.2**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 6.1.1 — Running Header & Top Baseline Detection.
+We are resuming ScanTailorReborn on Substep 6.1.2 — Vertical Page Registration Anchor.
 
 1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 2–3) and `docs/WHITE_PAPER.md` Phase 6, Step 6.1 plus the relevant Release Criteria.
-3. Propose a design for detecting running headers and page folios across all pages (height consistency, vertical proximity clustering), covering API, manifest telemetry, overrides, and tests. Pause for approval before implementing.
+2. Review `docs/HANDOFF.md` (Sections 2–3, especially §3.10) and `docs/WHITE_PAPER.md` Phase 6, Step 6.1 plus release criteria 4 and 5.
+3. Propose a design for aligning `fullBody` pages by their `PageTopAnchor.anchorY` (mapped through the layout plan) instead of content-box top, while preserving sinkage on `edgeAnchoredPartial` and `standaloneFloating` pages; cover API, manifest telemetry, overrides, a CLI switch, and tests. Pause for approval before implementing.
 4. After approval, implement with tests, run `swift test`, and confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 6.1.2.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 6.2.1.
 ```
