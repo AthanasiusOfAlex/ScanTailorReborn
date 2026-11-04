@@ -97,6 +97,8 @@ public struct ScanTailorCLI {
         public var renderAllDiagnostics: Bool = false
         public var verticalRegistrationMode: VerticalRegistrationMode = .automatic
         public var enableRunningHeaderDetection: Bool = true
+        public var enableDimensionConsensus: Bool = true
+        public var outlierTolerance: Double = 0.08
 
         public init(inputPDFPath: String, outputPDFPath: String) {
             self.inputPDFPath = inputPDFPath
@@ -154,6 +156,8 @@ public struct ScanTailorCLI {
         var allDiagnostics = false
         var verticalMode: VerticalRegistrationMode = .automatic
         var enableHeaderDetection = true
+        var dimensionConsensus = true
+        var outlierTolerance = 0.08
 
         var i = 0
         while i < args.count {
@@ -319,6 +323,24 @@ public struct ScanTailorCLI {
                     throw .invalidOptionValue(flag: arg, value: args[i + 1])
                 }
                 i += 2
+            case "--dimension-consensus":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                switch args[i + 1].lowercased() {
+                case "auto", "automatic", "on":
+                    dimensionConsensus = true
+                case "off":
+                    dimensionConsensus = false
+                default:
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                i += 2
+            case "--outlier-tolerance":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let value = Double(args[i + 1]), value >= 0.02, value <= 0.5 else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                outlierTolerance = value
+                i += 2
             case "--no-running-headers":
                 enableHeaderDetection = false
                 i += 1
@@ -385,6 +407,8 @@ public struct ScanTailorCLI {
         opts.renderAllDiagnostics = allDiagnostics
         opts.verticalRegistrationMode = verticalMode
         opts.enableRunningHeaderDetection = enableHeaderDetection
+        opts.enableDimensionConsensus = dimensionConsensus
+        opts.outlierTolerance = outlierTolerance
         return opts
     }
 
@@ -482,7 +506,11 @@ public struct ScanTailorCLI {
             enableDeskMasking: options.enableDeskMasking,
             enableBorderFallback: options.enableBorderFallback,
             enableRunningHeaderDetection: options.enableRunningHeaderDetection,
-            verticalRegistrationConfiguration: VerticalRegistration.Configuration(mode: options.verticalRegistrationMode)
+            verticalRegistrationConfiguration: VerticalRegistration.Configuration(mode: options.verticalRegistrationMode),
+            dimensionConsensusConfiguration: DimensionConsensus.Configuration(
+                enabled: options.enableDimensionConsensus,
+                toleranceFraction: options.outlierTolerance
+            )
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -597,6 +625,11 @@ public struct ScanTailorCLI {
         print(formatManifestSummary(manifest))
     }
 
+    private static func percent(_ fraction: Double) -> String {
+        let value = Int((fraction * 100).rounded())
+        return value >= 0 ? "+\(value)%" : "\(value)%"
+    }
+
     public static func formatManifestSummary(_ manifest: BookProcessingManifest) -> String {
         var lines: [String] = []
         lines.append("=== ScanTailorReborn Manifest Summary ===")
@@ -664,6 +697,25 @@ public struct ScanTailorCLI {
                 }
                 if let before = registration.bodySpreadBeforePixels, let after = registration.bodySpreadAfterPixels {
                     text += " | body spread \(before)→\(after) px"
+                }
+                lines.append(text)
+            }
+        }
+        if let consensus = manifest.dimensionConsensus {
+            if !consensus.applied {
+                lines.append("Dimension Consensus: not applied (\(consensus.note ?? "off"))")
+            } else {
+                var text = "Dimension Consensus: \(consensus.canonicalPageCount) canonical · \(consensus.outlierPageCount) outlier"
+                let described = manifest.pages.compactMap { page -> String? in
+                    guard let d = page.dimension, d.dimensionClass == .outlier else { return nil }
+                    let kinds = d.kinds.map(\.rawValue).joined(separator: "/")
+                    let scale = d.scaleMismatch ? " scale≠" : ""
+                    return "p\(page.outputPageIndex + 1) \(kinds) \(Self.percent(d.widthDeviation)) W \(Self.percent(d.heightDeviation)) H\(scale)"
+                }
+                if !described.isEmpty { text += " (" + described.prefix(6).joined(separator: "; ") + (described.count > 6 ? "; …" : "") + ")" }
+                if consensus.ambiguous { text += " | ambiguous: sizes not trusted" }
+                if !consensus.splitVetoedSourcePages.isEmpty {
+                    text += " | not split: scans " + consensus.splitVetoedSourcePages.map { String($0 + 1) }.joined(separator: ",")
                 }
                 lines.append(text)
             }
@@ -745,6 +797,9 @@ public struct ScanTailorCLI {
       --no-border-fallback         Disable the macro-cluster border fallback on marginal-geometry pages
       --vertical-anchor <mode>     Vertical page registration: auto (default; align full-body pages on their running
                                    header or first body baseline) or box-top (legacy; align content-box tops)
+      --dimension-consensus <mode> Group pages by size: auto (default; covers, plates and foldouts of a different size
+                                   are kept out of the book's page size) or off
+      --outlier-tolerance <frac>   Relative size difference that makes a page an outlier (default 0.08)
       --no-running-headers         Disable running-header detection (and with it, vertical registration)
       --no-ocr                     Disable OCR searchable text layer
       --ocr-engine <engine>        OCR engine: apple (default on macOS), tesseract, dual

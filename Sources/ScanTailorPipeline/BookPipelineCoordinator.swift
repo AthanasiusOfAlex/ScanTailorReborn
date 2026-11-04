@@ -18,6 +18,8 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
     public var runningHeader: RunningHeaderPolicy?
     /// Per-page vertical registration policy (`nil` is `.automatic`).
     public var verticalRegistration: VerticalRegistrationPolicy?
+    /// Forces the page to be a canonical page or a dimensional outlier (`nil` is automatic; Substep 6.2.1).
+    public var dimensionClass: DimensionClass?
 
     public init(
         overrideSkewDegrees: Double? = nil,
@@ -26,8 +28,10 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
         overrideDestinationOrigin: Point2I? = nil,
         borderFallback: BorderFallbackPolicy? = nil,
         runningHeader: RunningHeaderPolicy? = nil,
-        verticalRegistration: VerticalRegistrationPolicy? = nil
+        verticalRegistration: VerticalRegistrationPolicy? = nil,
+        dimensionClass: DimensionClass? = nil
     ) {
+        self.dimensionClass = dimensionClass
         self.verticalRegistration = verticalRegistration
         self.borderFallback = borderFallback
         self.runningHeader = runningHeader
@@ -78,6 +82,8 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
     /// Vertical registration outcome (`nil` when no anchors were available or for manifests
     /// written before Substep 6.1.2).
     public var registration: PageVerticalRegistration?
+    /// Consensus-dimension outcome (`nil` for manifests written before Substep 6.2.1).
+    public var dimension: PageDimensionRecord?
 
     public init(
         outputPageIndex: Int,
@@ -97,8 +103,10 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
         manualOverride: PageManualOverride? = nil,
         borderFallback: MacroBorderResult? = nil,
         topAnchor: PageTopAnchor? = nil,
-        registration: PageVerticalRegistration? = nil
+        registration: PageVerticalRegistration? = nil,
+        dimension: PageDimensionRecord? = nil
     ) {
+        self.dimension = dimension
         self.borderFallback = borderFallback
         self.topAnchor = topAnchor
         self.registration = registration
@@ -186,6 +194,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     /// Book-wide vertical registration summary (`nil` when no anchors were available or for
     /// manifests written before Substep 6.1.2).
     public var verticalRegistration: VerticalRegistrationSummary?
+    /// Book-wide consensus-dimension summary (`nil` for manifests written before Substep 6.2.1).
+    public var dimensionConsensus: DimensionConsensusSummary?
 
     public init(
         processingDPI: Int,
@@ -205,8 +215,10 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         physicalScaleAmbiguous: Bool = false,
         sourcePageGeometry: [SourcePageGeometryRecord] = [],
         runningHeaderModel: RunningHeaderModel? = nil,
-        verticalRegistration: VerticalRegistrationSummary? = nil
+        verticalRegistration: VerticalRegistrationSummary? = nil,
+        dimensionConsensus: DimensionConsensusSummary? = nil
     ) {
+        self.dimensionConsensus = dimensionConsensus
         self.runningHeaderModel = runningHeaderModel
         self.verticalRegistration = verticalRegistration
         self.processingDPI = processingDPI
@@ -246,6 +258,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case sourcePageGeometry
         case runningHeaderModel
         case verticalRegistration
+        case dimensionConsensus
     }
 
     public init(from decoder: Decoder) throws {
@@ -268,6 +281,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.sourcePageGeometry = try container.decodeIfPresent([SourcePageGeometryRecord].self, forKey: .sourcePageGeometry) ?? []
         self.runningHeaderModel = try container.decodeIfPresent(RunningHeaderModel.self, forKey: .runningHeaderModel)
         self.verticalRegistration = try container.decodeIfPresent(VerticalRegistrationSummary.self, forKey: .verticalRegistration)
+        self.dimensionConsensus = try container.decodeIfPresent(DimensionConsensusSummary.self, forKey: .dimensionConsensus)
     }
 }
 
@@ -360,6 +374,8 @@ public struct BookPipelineCoordinator: Sendable {
         /// Vertical registration configuration. Registration aligns full-body pages on their running
         /// header (or first body baseline) and needs `enableRunningHeaderDetection`.
         public var verticalRegistrationConfiguration: VerticalRegistration.Configuration
+        /// Consensus-dimension clustering (Substep 6.2.1): which pages share the book's page size.
+        public var dimensionConsensusConfiguration: DimensionConsensus.Configuration
 
         public init(
             processingDPI: Int = 600,
@@ -396,8 +412,10 @@ public struct BookPipelineCoordinator: Sendable {
             borderFallbackMarginalConfidence: Double = 0.70,
             enableRunningHeaderDetection: Bool = true,
             runningHeaderConfiguration: RunningHeaderDetector.Configuration = RunningHeaderDetector.Configuration(),
-            verticalRegistrationConfiguration: VerticalRegistration.Configuration = VerticalRegistration.Configuration()
+            verticalRegistrationConfiguration: VerticalRegistration.Configuration = VerticalRegistration.Configuration(),
+            dimensionConsensusConfiguration: DimensionConsensus.Configuration = DimensionConsensus.Configuration()
         ) {
+            self.dimensionConsensusConfiguration = dimensionConsensusConfiguration
             self.verticalRegistrationConfiguration = verticalRegistrationConfiguration
             self.enableRunningHeaderDetection = enableRunningHeaderDetection
             self.runningHeaderConfiguration = runningHeaderConfiguration
@@ -1107,6 +1125,12 @@ public struct BookPipelineCoordinator: Sendable {
         let minSagPixels = configuration.minDewarpSagPixelsAt600DPI * dpiScale
         let effectiveGutterTrimWidth = max(0, Int((Double(configuration.gutterTrimWidth) * dpiScale).rounded()))
 
+        // Landscape scans in a portrait book are plates or tables, not two-page spreads (Substep 6.2.1).
+        let dimensionConsensus = DimensionConsensus(configuration: configuration.dimensionConsensusConfiguration)
+        let splitVetoedSources: Set<Int> = configuration.splitMode == .automatic
+            ? Set(dimensionConsensus.splitVetoes(sourceSizes: sourcePages.map { Size2I(width: $0.width, height: $0.height) }))
+            : []
+
         for (srcIdx, unrectifiedScan) in sourcePages.enumerated() {
             // 0a. Document quadrangle detection & perspective rectification (desk excision).
             let (rectifiedScan, rectificationRecord) = rectifySourcePage(
@@ -1122,7 +1146,7 @@ public struct BookPipelineCoordinator: Sendable {
 
             let splitDecision = PageSplitEstimator.estimateSplit(
                 in: rawScan,
-                mode: configuration.splitMode
+                mode: splitVetoedSources.contains(srcIdx) ? .singlePage : configuration.splitMode
             )
             sourceSplits.append(splitDecision)
             let slices = PageSplitEstimator.split(
@@ -1351,9 +1375,28 @@ public struct BookPipelineCoordinator: Sendable {
             )
         }
 
+        // Which pages share the book's page size, and which are covers, plates, or foldouts?
+        let dimensionInputs = pass1Pages.enumerated().map { idx, p in
+            DimensionConsensus.PageInput(
+                pageIndex: p.outputPageIndex,
+                pageSize: Size2I(width: p.cleanedBitmap.width, height: p.cleanedBitmap.height),
+                contentBox: p.manualOverride?.overrideContentBox ?? p.detection.contentBox,
+                bodyLinePitch: idx < lineProfiles.count ? lineProfiles[idx].bodyLinePitch : nil,
+                forcedClass: p.manualOverride?.dimensionClass
+            )
+        }
+        var dimensionResult = dimensionConsensus.classify(pages: dimensionInputs)
+        dimensionResult.summary.splitVetoedSourcePages = splitVetoedSources.sorted()
+        var outlierCanvasSizes: [Int: Size2I] = [:]
+        for (input, record) in zip(dimensionInputs, dimensionResult.records) {
+            if let size = record.proposedCanvasSize { outlierCanvasSizes[input.pageIndex] = size }
+        }
+
         let bookLayout = harmonizer.harmonizeBook(
             pages: harmonizerInputs,
-            detector: contentDetector
+            detector: contentDetector,
+            dimensionOutliers: dimensionResult.outlierPageIndices,
+            outlierCanvasSizes: outlierCanvasSizes
         )
 
         // --- PASS 3: Canonical Framing, 600 -> 300 DPI Downsampling, OCR & 1-Bit PDF Assembly ---
@@ -1410,6 +1453,9 @@ public struct BookPipelineCoordinator: Sendable {
             )
             overriddenPlans = registered.plans
             registrationRecords = registered.records.map(Optional.some)
+            for idx in registrationRecords.indices where overriddenPlans[idx].isDimensionOutlier {
+                registrationRecords[idx]?.flags.append("registration:dimensionalOutlier")
+            }
             registrationSummary = registered.summary
         }
 
@@ -1505,7 +1551,8 @@ public struct BookPipelineCoordinator: Sendable {
                     manualOverride: p1.manualOverride,
                     borderFallback: p1.borderFallback,
                     topAnchor: topAnchors[idx],
-                    registration: registrationRecords[idx]
+                    registration: registrationRecords[idx],
+                    dimension: dimensionResult.records[idx]
                 )
             )
             outputBitmaps.append(finalBitmap)
@@ -1567,7 +1614,8 @@ public struct BookPipelineCoordinator: Sendable {
             physicalScaleAmbiguous: physicalScaleAmbiguous,
             sourcePageGeometry: sourceGeometry,
             runningHeaderModel: runningHeaderModel,
-            verticalRegistration: registrationSummary
+            verticalRegistration: registrationSummary,
+            dimensionConsensus: dimensionResult.summary
         )
 
         return PipelineOutput(

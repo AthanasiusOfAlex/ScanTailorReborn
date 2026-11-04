@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-04  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 6, Step 6.1 complete (6.1.1, 6.1.2 done). Next: **Substep 6.2.1 — Consensus Dimension Clustering** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
+**Current Active Milestone**: Phase 6, Substeps 6.1.1, 6.1.2 and 6.2.1 done. Next: **Substep 6.2.2 — Independent Outlier Trim Box** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -35,9 +35,10 @@ All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps
   - `vermeersch.1934` (*Vermeersch 1934* — photocopied two-page spreads with dark gutter seams)
   - `simpson.1968/simpson.1968.400-403.pdf` (*Simpson 1968* — handheld smartphone camera spread wrapped at 72 DPI)
   These files are **not** needed for `swift test`, only for optional empirical CLI runs and Phase 7.1 benchmark verification.
-- **Opt-in real-book tests (Substep 6.1.2)**: `RealCorpusTests` reads short excerpts straight from the library (no scans are copied into the repo): `flannery.1993` pp. 1–8, `gury.1866` pp. 300–307, `vermeersch.1934` pp. 1–6, and `long.2015` spreads 57–59 (folios 110–115). Point `SCANTAILOR_CORPUS_DIR` at the folder that holds the book folders and run them **in release** (about 20 s; a debug build needs about half an hour):
+- **Running the tests (use release)**: the image loops run about 80× slower unoptimized, so a debug `swift test` takes about 10 minutes (the real-book tests about 30). Use [`scripts/test.sh`](../scripts/test.sh): `fast [filter]` runs the whole suite in release (`-c release -Xswiftc -enable-testing`, about 1 minute including the build, 5–10 s of test time), `corpus [filter]` does the same with `SCANTAILOR_CORPUS_DIR` set (default: the OneDrive library below), and `debug [filter]` runs the debug suite. Release compiles out the `assert` bounds checks in the `BinaryBitmap`/`GrayscaleBuffer` subscripts, so **run `scripts/test.sh debug` once per substep, in the background, before committing**. Build the CLI with the same flags (`swift build -c release -Xswiftc -enable-testing`) so tests and CLI runs share one build.
+- **Opt-in real-book tests (Substeps 6.1.2, 6.2.1)**: `RealCorpusTests` reads short excerpts straight from the library (no scans are copied into the repo): `flannery.1993` pp. 1–8, `gury.1866` pp. 300–307, `vermeersch.1934` pp. 1–6, `long.2015` spreads 57–59 (folios 110–115), `SLE.2` scans 2–8 (landscape table on scan 5) and `pilsner.2006` pp. 1–6 (thumbnail cover). Point `SCANTAILOR_CORPUS_DIR` at the folder that holds the book folders and run them **in release** (about 20 s each):
   ```bash
-  SCANTAILOR_CORPUS_DIR="$HOME/Library/CloudStorage/OneDrive-MRC/PDFs-in-the-making" swift test -c release --filter RealCorpusTests
+  scripts/test.sh corpus RealCorpusTests
   ```
   Real scans are in `<book>/00-pdf-orig/` (occasionally `00-jpeg-orig`). `scantailor-cli process … --diagnostics-dir <dir>` writes `<stem>-lines.json` there (every page's detected text lines, anchor and registration) for debugging detector misses.
 
@@ -60,7 +61,7 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
   - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **Completed**
   - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **Completed**
-  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1`, `6.1.2` done)
+  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1`, `6.1.2`, `6.2.1` done)
   - **Phase 7**: Verification & Final `v1.0.0` Release (`7.1.1` – `7.2.2`) — Pending
 
 ---
@@ -221,16 +222,28 @@ Completes Step 6.1. Full-body pages are now placed so their **running-header bas
 
 ---
 
+### 3.12 Recently Completed: Substep 6.2.1 (Consensus Dimension Clustering)
+Groups the processed pages into **canonical** pages and **dimensional outliers** (covers, plates, foldouts, landscape tables). It decides and records; it does **not** change how outliers are drawn: that is 6.2.2. Output for a book with no outliers is unchanged.
+1. **Classifier** ([`DimensionConsensus.swift`](../Sources/ScanTailorCore/Layout/DimensionConsensus.swift), pure statistics on sizes and boxes, no pixels). A page is an outlier when its width or height differs from the book median by more than max(`iqrMultiplier` (1.5) × IQR, `toleranceFraction` (8 %) × median): `oversize`/`undersize`; `orientation` (landscape page in a portrait book); `contentOverflow` (normal page size but a text block > 15 % beyond the 85th percentile of the book's); `manual`. 8 % because ordinary cropping varies by up to ~5 % (bouscaren) and covers by 9 % or more. Fewer than 5 pages: not applied (`note: tooFewPages`). If more than 25 % of pages differ, or the IQR itself exceeds 25 % of the median (a large second size group such as ELPost's 22-page appendix), sizes are not trusted (`ambiguous`, only content overflow and manual classes count). Also `scaleMismatch` (body line pitch > 20 % off the book's; flag only, Pennacchi p. 42), a `proposedCanvasSize` for each outlier (its page size, or its text block if larger) and `outlierGroups` (outliers within 5 % of one size).
+2. **Split veto** (pre-pass-1, `splitMode == .automatic` only): when ≥ 75 % of the source scans are portrait, a landscape scan is processed as a single page, not split down the middle (SLE.2's tables). Recorded in `splitVetoedSourcePages`.
+3. **Harmonizer** ([`MarginHarmonizer.swift`](../Sources/ScanTailorCore/Layout/MarginHarmonizer.swift)): `harmonizeBook(pages:detector:dimensionOutliers:outlierCanvasSizes:)`. Outliers are excluded from the median page size, the width prior and the canonical-frame percentiles; they skip pass-2 width trimming (their text block stays whole), are forced to Tier 3 and get `PageLayoutPlan.proposedCanvasSize` (non-nil = outlier, `isDimensionOutlier`). With fewer than 3 canonical pages the set is ignored. Placement on the shared canvas is unchanged Tier 3 placement, so **Flannery's cover is still clipped until 6.2.2 gives it its own page**.
+4. **Registration**: outliers are Tier 3, hence preserved; their record gains `registration:dimensionalOutlier`.
+5. **Manifest/overrides/CLI** (all optional in JSON): `PageProcessingRecord.dimension` (`dimensionClass`, `kinds`, signed `widthDeviation`/`heightDeviation`/`linePitchDeviation`, `scaleMismatch`, `proposedCanvasSize`, `groupIndex`), `BookProcessingManifest.dimensionConsensus` (applied, ambiguous, note, median size, counts, `outlierPages`, `outlierGroups`, `splitVetoedSourcePages`, tolerance). `PageManualOverride.dimensionClass` (`canonical`/`outlier`). CLI `--dimension-consensus auto|off` (off: old behaviour, no veto) and `--outlier-tolerance <0.02–0.5>`; `inspect` prints `Dimension Consensus: N canonical · N outlier (p1 oversize +30% W +9% H; …) | not split: scans 5`.
+6. **Tests**: [`DimensionConsensusTests.swift`](../Tests/ScanTailorCoreTests/DimensionConsensusTests.swift) (14; 13 in milliseconds, one small pipeline run of ~2.5 s), plus `RealCorpusTests`: Flannery cover is the one oversize outlier and the canvas stays under 4,200 px; SLE.2 table kept whole and marked `orientation`; Pilsner thumbnail cover is `undersize`.
+7. **Known limitations / hand-offs**: (a) outliers are only recorded, not rendered on their own canvas (**6.2.2**; `ApplePDFDocumentWriter` already takes a page box per page, but the coordinator renders every page on the shared canvas); (b) the canonical frame of a book whose body pages themselves vary is unchanged; (c) ELPost's second size group (pp. 336–357) is not an outlier (ambiguity guard) and is not recorded as a cluster; (d) scale mismatch is not corrected; (e) the veto looks at scan shape only, so a portrait foldout in a landscape-scan book is not caught; (f) the veto runs before rectification, on the declared scan size.
+
+---
+
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 6, Substep 6.2.1**, copy and provide the following prompt:
+To begin **Phase 6, Substep 6.2.2**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 6.2.1 — Consensus Dimension Clustering.
+We are resuming ScanTailorReborn on Substep 6.2.2 — Independent Outlier Trim Box.
 
 1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 2–3, especially §3.10–3.11) and `docs/WHITE_PAPER.md` Phase 6, Step 6.2 plus the release criteria on canonical page size. Real books for checking: §1.3 (opt-in `RealCorpusTests`, `--diagnostics-dir` line dump).
-3. Propose a design for grouping processed pages into canonical body pages versus legitimate dimensional outliers (cover pages, foldout plates) with IQR and median consensus metrics; cover API, manifest telemetry, overrides, a CLI switch, and tests. Pause for approval before implementing.
-4. After approval, implement with tests, run `swift test`, and confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 6.2.2.
+2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.12) and `docs/WHITE_PAPER.md` Phase 6, Step 6.2. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
+3. Propose a design for giving each dimensional outlier (`PageLayoutPlan.proposedCanvasSize`, `PageProcessingRecord.dimension`) its own isolated PDF page size and canvas in `ApplePDFDocumentWriter.swift` and the coordinator's pass 3, without distorting the canonical trim size; cover rendering, the 600 → 300 DPI downsample, the anti-billboard clamp, manifest telemetry, overrides, a CLI switch and tests. Pause for approval before implementing.
+4. After approval, implement with tests, confirm all tests pass with 0 warnings.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Step 6.3.
 ```

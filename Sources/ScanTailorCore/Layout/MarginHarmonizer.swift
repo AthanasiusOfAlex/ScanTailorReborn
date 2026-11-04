@@ -162,6 +162,12 @@ public struct MarginHarmonizer: Sendable {
         /// For Tier 2 pages, which vertical edge was pinned to the canonical frame (`nil` for
         /// Tiers 1 and 3 and for plans written before Substep 6.1.2).
         public var verticalAnchorEdge: VerticalAnchorEdge?
+        /// For dimensional outliers (Substep 6.2.1), the page size this page should get on its own canvas
+        /// (`nil` for canonical pages and for plans written before 6.2.1).
+        public var proposedCanvasSize: Size2I?
+
+        /// Whether the page was classified as a dimensional outlier.
+        public var isDimensionOutlier: Bool { proposedCanvasSize != nil }
 
         public init(
             pageIndex: Int,
@@ -173,9 +179,11 @@ public struct MarginHarmonizer: Sendable {
             rejectedClusterBoxes: [Rect2I],
             destinationOrigin: Point2I,
             canvasSize: Size2I,
-            verticalAnchorEdge: VerticalAnchorEdge? = nil
+            verticalAnchorEdge: VerticalAnchorEdge? = nil,
+            proposedCanvasSize: Size2I? = nil
         ) {
             self.verticalAnchorEdge = verticalAnchorEdge
+            self.proposedCanvasSize = proposedCanvasSize
             self.pageIndex = pageIndex
             self.side = side
             self.tier = tier
@@ -220,9 +228,16 @@ public struct MarginHarmonizer: Sendable {
 
     /// Performs Pass 2 book-wide statistical outlier rejection, estimates canonical text frames,
     /// and classifies & positions every page according to the 3-tier layout policy.
+    ///
+    /// - Parameter dimensionOutliers: Page indices classified as dimensional outliers (Substep 6.2.1). They are
+    ///   left out of the median page size and the canonical frame, and are forced to Tier 3 with
+    ///   `proposedCanvasSize` set to `outlierCanvasSizes[pageIndex]` (or their own size). When fewer than three
+    ///   canonical pages would remain, the set is ignored.
     public func harmonizeBook(
         pages: [PageInput],
-        detector: ContentBoxDetector = ContentBoxDetector()
+        detector: ContentBoxDetector = ContentBoxDetector(),
+        dimensionOutliers: Set<Int> = [],
+        outlierCanvasSizes: [Int: Size2I] = [:]
     ) -> BookLayoutModel {
         guard !pages.isEmpty else {
             if configuration.targetPageSize == nil && configuration.targetContentBoxSize == nil {
@@ -271,9 +286,12 @@ public struct MarginHarmonizer: Sendable {
 
         // Step 1: Collect raw non-empty content widths and heights to estimate the 75th-percentile
         // canonical width prior for Pass 2 smudge outlier rejection (or use explicit `--content-box-size` width).
-        let rawBoxes = pages.compactMap(\.detection.contentBox).filter { !$0.isEmpty }
-        let medianPageWidth = Self.percentileInt(pages.map(\.pageSize.width), p: 0.50) ?? pages[0].pageSize.width
-        let medianPageHeight = Self.percentileInt(pages.map(\.pageSize.height), p: 0.50) ?? pages[0].pageSize.height
+        let canonicalCandidates = pages.filter { !dimensionOutliers.contains($0.pageIndex) }
+        let outlierSet: Set<Int> = canonicalCandidates.count >= 3 ? dimensionOutliers : []
+        let statPages = outlierSet.isEmpty ? pages : canonicalCandidates
+        let rawBoxes = statPages.compactMap(\.detection.contentBox).filter { !$0.isEmpty }
+        let medianPageWidth = Self.percentileInt(statPages.map(\.pageSize.width), p: 0.50) ?? pages[0].pageSize.width
+        let medianPageHeight = Self.percentileInt(statPages.map(\.pageSize.height), p: 0.50) ?? pages[0].pageSize.height
 
         let priorCanonicalWidth: Int
         if let explicitBox = explicitContentBoxSize {
@@ -299,7 +317,8 @@ public struct MarginHarmonizer: Sendable {
         outlierTrimFlags.reserveCapacity(pages.count)
 
         for page in pages {
-            let refined = detector.refineWithCanonicalWidthPrior(
+            // A dimensional outlier keeps its whole text block: its width is not the book's width.
+            let refined = outlierSet.contains(page.pageIndex) ? page.detection : detector.refineWithCanonicalWidthPrior(
                 page.detection,
                 canonicalWidth: priorCanonicalWidth,
                 maxWidthExcessFraction: configuration.pass2OutlierWidthExcessFraction
@@ -313,7 +332,10 @@ public struct MarginHarmonizer: Sendable {
         // of refined body-candidate boxes (unless overridden via `targetContentBoxSize`), with IQR and
         // median deviation outlier rejection to prevent standalone title pages or oversize foldouts from
         // expanding the canonical text frame.
-        let refinedBoxes = refinedDetections.compactMap(\.contentBox).filter { !$0.isEmpty }
+        let refinedBoxes = pages.indices
+            .filter { !outlierSet.contains(pages[$0].pageIndex) }
+            .compactMap { refinedDetections[$0].contentBox }
+            .filter { !$0.isEmpty }
         let bodyCandidateBoxes = refinedBoxes.filter { box in
             box.width >= priorCanonicalWidth * 75 / 100
         }
@@ -435,7 +457,9 @@ public struct MarginHarmonizer: Sendable {
                         retainedClusterBoxes: [],
                         rejectedClusterBoxes: det.rejectedBoxes,
                         destinationOrigin: Point2I(x: targetFrame.minX, y: targetFrame.minY),
-                        canvasSize: canvasSize
+                        canvasSize: canvasSize,
+                        proposedCanvasSize: outlierSet.contains(page.pageIndex)
+                            ? (outlierCanvasSizes[page.pageIndex] ?? page.pageSize) : nil
                     )
                 )
                 continue
@@ -445,8 +469,9 @@ public struct MarginHarmonizer: Sendable {
             let heightRatioDiff = abs(Double(box.height - targetFrame.height)) / Double(max(1, targetFrame.height))
             let heightRatio = Double(box.height) / Double(max(1, targetFrame.height))
 
-            let matchesCanonicalWidth = widthRatioDiff <= configuration.fullWidthToleranceFraction
-            let matchesCanonicalHeight = heightRatioDiff <= configuration.fullHeightToleranceFraction
+            let isOutlier = outlierSet.contains(page.pageIndex)
+            let matchesCanonicalWidth = !isOutlier && widthRatioDiff <= configuration.fullWidthToleranceFraction
+            let matchesCanonicalHeight = !isOutlier && heightRatioDiff <= configuration.fullHeightToleranceFraction
 
             let tier: PlacementTier
             let destOrigin: Point2I
@@ -461,7 +486,7 @@ public struct MarginHarmonizer: Sendable {
                     x: Self.clampOrigin(targetFrame.minX, span: box.width, canvasSpan: canvasSize.width),
                     y: Self.clampOrigin(targetFrame.minY, span: box.height, canvasSpan: canvasSize.height)
                 )
-            } else if matchesCanonicalWidth && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height {
+            } else if !isOutlier && matchesCanonicalWidth && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height {
                 // Tier 2 — Edge-Anchored Partial Page (e.g. chapter start with top sinkage or chapter end):
                 // Compare how closely the physical top edge vs. physical bottom edge of `box` matches `targetFrame`.
                 let naturalTopY = box.minY + physicalOffsetY
@@ -524,7 +549,8 @@ public struct MarginHarmonizer: Sendable {
                     rejectedClusterBoxes: det.rejectedBoxes,
                     destinationOrigin: destOrigin,
                     canvasSize: canvasSize,
-                    verticalAnchorEdge: anchorEdge
+                    verticalAnchorEdge: anchorEdge,
+                    proposedCanvasSize: isOutlier ? (outlierCanvasSizes[page.pageIndex] ?? page.pageSize) : nil
                 )
             )
         }
