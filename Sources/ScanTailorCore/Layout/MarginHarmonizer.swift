@@ -233,12 +233,15 @@ public struct MarginHarmonizer: Sendable {
     ///   left out of the median page size and the canonical frame, and are forced to Tier 3 with
     ///   `proposedCanvasSize` set to `outlierCanvasSizes[pageIndex]` (or their own size). When fewer than three
     ///   canonical pages (`minimumCanonicalPages`, 1 for a manual list) would remain, the set is ignored.
+    /// - Parameter forcedTiers: Tiers an agent or user fixed for specific pages (Substep 6.3.1), keyed by page index.
+    ///   A forced page is placed by its tier's rule whatever its measured size; automatic classification is skipped for it.
     public func harmonizeBook(
         pages: [PageInput],
         detector: ContentBoxDetector = ContentBoxDetector(),
         dimensionOutliers: Set<Int> = [],
         outlierCanvasSizes: [Int: Size2I] = [:],
-        minimumCanonicalPages: Int = 3
+        minimumCanonicalPages: Int = 3,
+        forcedTiers: [Int: PlacementTier] = [:]
     ) -> BookLayoutModel {
         guard !pages.isEmpty else {
             if configuration.targetPageSize == nil && configuration.targetContentBoxSize == nil {
@@ -471,14 +474,18 @@ public struct MarginHarmonizer: Sendable {
             let heightRatio = Double(box.height) / Double(max(1, targetFrame.height))
 
             let isOutlier = outlierSet.contains(page.pageIndex)
+            let forcedTier = forcedTiers[page.pageIndex]
             let matchesCanonicalWidth = !isOutlier && widthRatioDiff <= configuration.fullWidthToleranceFraction
             let matchesCanonicalHeight = !isOutlier && heightRatioDiff <= configuration.fullHeightToleranceFraction
+            let placeAsFullBody = forcedTier.map { $0 == .fullBody } ?? (matchesCanonicalWidth && matchesCanonicalHeight)
+            let placeAsPartial = forcedTier.map { $0 == .edgeAnchoredPartial }
+                ?? (!isOutlier && matchesCanonicalWidth && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height)
 
             let tier: PlacementTier
             let destOrigin: Point2I
             var anchorEdge: VerticalAnchorEdge? = nil
 
-            if matchesCanonicalWidth && matchesCanonicalHeight {
+            if placeAsFullBody {
                 // Tier 1 — Full Body Page:
                 // Lock to the canonical text frame origin so left/right margins and running headers
                 // stay rock-steady across page turns.
@@ -487,7 +494,7 @@ public struct MarginHarmonizer: Sendable {
                     x: Self.clampOrigin(targetFrame.minX, span: box.width, canvasSpan: canvasSize.width),
                     y: Self.clampOrigin(targetFrame.minY, span: box.height, canvasSpan: canvasSize.height)
                 )
-            } else if !isOutlier && matchesCanonicalWidth && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height {
+            } else if placeAsPartial {
                 // Tier 2 — Edge-Anchored Partial Page (e.g. chapter start with top sinkage or chapter end):
                 // Compare how closely the physical top edge vs. physical bottom edge of `box` matches `targetFrame`.
                 let naturalTopY = box.minY + physicalOffsetY

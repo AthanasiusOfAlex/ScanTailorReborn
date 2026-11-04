@@ -86,6 +86,8 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
     public var isolatedCanvasPages: [Int]
     /// Entries of a manual `--outlier-pages` list (1-based) that name no page of the book.
     public var ignoredManualPages: [Int]
+    /// Scan references (`s45L`) of a manual list that matched no page of the book (Substep 6.3.1).
+    public var ignoredManualReferences: [String]
     /// The relative tolerance used.
     public var toleranceFraction: Double
 
@@ -101,8 +103,10 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
         splitVetoedSourcePages: [Int] = [],
         toleranceFraction: Double = 0.08,
         isolatedCanvasPages: [Int] = [],
-        ignoredManualPages: [Int] = []
+        ignoredManualPages: [Int] = [],
+        ignoredManualReferences: [String] = []
     ) {
+        self.ignoredManualReferences = ignoredManualReferences
         self.isolatedCanvasPages = isolatedCanvasPages
         self.ignoredManualPages = ignoredManualPages
         self.applied = applied
@@ -131,6 +135,7 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
         toleranceFraction = try c.decodeIfPresent(Double.self, forKey: .toleranceFraction) ?? 0.08
         isolatedCanvasPages = try c.decodeIfPresent([Int].self, forKey: .isolatedCanvasPages) ?? []
         ignoredManualPages = try c.decodeIfPresent([Int].self, forKey: .ignoredManualPages) ?? []
+        ignoredManualReferences = try c.decodeIfPresent([String].self, forKey: .ignoredManualReferences) ?? []
     }
 }
 

@@ -46,7 +46,7 @@ struct RealCorpusTests {
         var summary: VerticalRegistrationSummary?
     }
 
-    static func run(_ sample: Sample) async throws -> Run {
+    static func run(_ sample: Sample, configure: (inout BookPipelineCoordinator.Configuration) -> Void = { _ in }) async throws -> Run {
         let root = try #require(corpusDirectory)
         let url = URL(fileURLWithPath: root).appendingPathComponent(sample.relativePath)
         try #require(FileManager.default.fileExists(atPath: url.path), "missing corpus file \(url.path)")
@@ -57,7 +57,9 @@ struct RealCorpusTests {
 
         let reader = try ApplePDFSourceReader(url: url)
         let writer = try ApplePDFDocumentWriter(destinationURL: tempDir.appendingPathComponent("out.pdf"))
-        let coordinator = BookPipelineCoordinator(configuration: .init(pageRange: sample.pages))
+        var configuration = BookPipelineCoordinator.Configuration(pageRange: sample.pages)
+        configure(&configuration)
+        let coordinator = BookPipelineCoordinator(configuration: configuration)
         let output = try await coordinator.processBook(
             reader: reader, writer: writer, accelerator: MetalComputeAccelerator(), ocrEngine: nil
         )
@@ -192,5 +194,23 @@ struct RealCorpusTests {
         let bodySize = try #require(run.manifest.pages.dropFirst().first).layoutPlan.canvasSize
         #expect(cover.width < Double(bodySize.width) * 72.0 / 600.0, "the thumbnail cover stays a small page: \(cover)")
         #expect(run.manifest.pages.dropFirst().allSatisfy { !$0.layoutPlan.isDimensionOutlier }, "\(consensus)")
+    }
+
+    @Test("SLE.2 (scans 2-8): scan names count from the start of the PDF even with --page-range; a stopped run writes nothing")
+    func adjustmentsUseAbsoluteScanNumbers() async throws {
+        let adjustments = try PageAdjustments.parse(Data("""
+        { "pages": { "s5": { "outlier": false }, "s1": { "skew": 1 }, "s6": { "offset": { "x": "1mm" } } } }
+        """.utf8))
+        let run = try await Self.run(Self.sle) { $0.adjustments = adjustments; $0.stopAfter = .layout }
+        #expect(run.output.stoppedAfter == .layout && run.output.outputBitmapsAtOutputDPI.isEmpty)
+        #expect(run.manifest.sourceScanNumbers == Array(2...8))
+
+        // Scan 5 is the landscape table (the fourth scan processed): it is a normal page now.
+        let table = try #require(run.manifest.pages.first { run.manifest.scanNumber(of: $0) == 5 })
+        #expect(table.sourcePageIndex == 3 && table.dimension?.dimensionClass == .canonical)
+        #expect(run.manifest.scanReference(of: table) == "s5")
+        let report = try #require(run.manifest.adjustments)
+        #expect(report.applied.map(\.reference).sorted() == ["s5", "s6"], "\(report)")
+        #expect(report.ignored.map(\.reference) == ["s1"] && report.ignored.first?.reason.contains("not processed") == true, "\(report)")
     }
 }

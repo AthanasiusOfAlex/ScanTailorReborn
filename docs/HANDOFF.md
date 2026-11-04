@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-04  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 6, Substeps 6.1.1, 6.1.2, 6.2.1 and 6.2.2 done. Next: **Substep 6.3.1 — Manifest-Driven Per-Page Adjustments** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
+**Current Active Milestone**: Phase 6, Substeps 6.1.1, 6.1.2, 6.2.1, 6.2.2 and 6.3.1 done. Next: **Substep 6.3.2 — Cache-Accelerated Re-Rendering** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -61,12 +61,12 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
   - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **Completed**
   - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **Completed**
-  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1`, `6.1.2`, `6.2.1` done)
+  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1`–`6.3.1` done)
   - **Phase 7**: Verification & Final `v1.0.0` Release (`7.1.1` – `7.2.2`) — Pending
 
 ---
 
-## 3. Completed Substeps (`4.1.1`–`6.1.2`)
+## 3. Completed Substeps (`4.1.1`–`6.3.1`)
 
 ### 3.1 Recently Completed: Substep 4.1.1 (`FontScaleAnalyzer`)
 Implemented automatic font-scale heuristic, median glyph height analyzer, and pre-raster camera-wrapper scale rescue across 4 source/CLI/test layers:
@@ -242,18 +242,30 @@ Each dimensional outlier is drawn on its **own canvas and PDF page size**; the b
 5. **Tests**: [`OutlierCanvasTests.swift`](../Tests/ScanTailorCoreTests/OutlierCanvasTests.swift) (7, ~2 s; uses a recording PDF writer), plus corpus assertions for Flannery (cover on its own canvas, whole), SLE.2 (landscape table page) and Pilsner (small cover page).
 6. **Known limitations**: (a) the "outliers share the body's clamp factor" rule has no pipeline-level test (it needs billboard-sized pages); (b) thumbnail covers stay small (no upscaling of 1-bit images); (c) two-page viewers show odd-sized spreads around outliers; (d) foldouts are not rotated; (e) the manual list is by output page, so adding/removing pages or changing the split changes what the numbers mean.
 
+### 3.14 Recently Completed: Substep 6.3.1 (Manifest-Driven Per-Page Adjustments)
+The tool is a power tool for an iterate-and-inspect loop (default run → look → write a small edit file → re-run), not a system that foresees every edge case.
+
+1. **Adjustments file** (`--apply-manifest <file>`; [`PageAdjustments.swift`](../Sources/ScanTailorPipeline/PageAdjustments.swift)): strict JSON, separate from the large machine-written manifest. Sections: `book` (ordinary CLI options by flag name, without `--`; booleans become flags; the command line still wins), `scans` (`split` single|spread|auto, `splitX` "52%"/length, `disableRectification`, `disableDeskMask`) and `pages` (`skew`, `disableDewarp`, `contentBox.rect` [l,t,r,b], `contentBox.nudge` {top,left,bottom,right} positive = right/down, `offset` {x,y}, `tier`, `outlier` true|false, `pageSize`, `keep`, `drop`, `runningHeader`, `verticalRegistration`, `borderFallback`). Lengths **require a unit** (in, mm, cm, pt, px = 600 DPI raster pixels). Keys starting with `_`, `note`, `comment` are ignored. **Every problem is collected and reported together before any scan is processed**, with "did you mean" suggestions (`AdjustmentsError`). A complete manifest from an earlier run given to `--apply-manifest` is recognized and applied the old way (read-only).
+2. **Stable references** (`PageReference`): `45` = output page 45 of the run being looked at; `s12` = scan 12 of the source PDF, **counted from the start of the PDF even with `--page-range`** (new `BookProcessingManifest.sourceScanNumbers`; `scanNumber(of:)`, `scanReference(of:)`); `s12L`/`s12R` = left/right half. Specificity wins: `45` < `s12` < `s12L`. `--outlier-pages` accepts the same names (`1,45,s120L`) and still replaces automatic detection.
+3. **Application** (pass 1 of [`BookPipelineCoordinator.swift`](../Sources/ScanTailorPipeline/BookPipelineCoordinator.swift); resolution in [`AdjustmentResolver.swift`](../Sources/ScanTailorPipeline/AdjustmentResolver.swift)): the file is overlaid on stored `manualOverride`s (file wins per field). New `PageManualOverride` fields: `contentBoxNudge` (resolved into `overrideContentBox` during pass 1, so stored records stay idempotent), `destinationOffset` (applied after every automatic placement), `forcedTier` (`MarginHarmonizer.harmonizeBook(forcedTiers:)`), `pageSizeInches` (outlier on its own canvas, same aspect ±5 %), `keep`, `drop` (page leaves the book, recorded in `prunedPages`). Scan edits: forced `split`/exact `splitX` cut (a straight vertical `GutterSplitLine`), geometry overrides via the existing `SourcePageGeometryOverride`.
+4. **Reporting**: `BookProcessingManifest.adjustments` (`AdjustmentReport`: `applied` entries with field names, `ignored` entries with the reason, e.g. "scan 6 was not split into two pages", "scan 99 was not processed", "no output page 99"). Printed after the run and by `inspect`. Unresolved outlier scan names go to `DimensionConsensusSummary.ignoredManualReferences`.
+5. **Cheap stage runs**: `--stop-after layout` (`PipelineStop`, `DiscardingPDFWriter`) runs pass 1, consensus, harmonization and registration, then renders, recognizes and writes nothing (needs `--manifest` or `--diagnostics-dir`; `-o` optional). It writes **layout contact sheets** ([`LayoutContactSheetRenderer.swift`](../Sources/ScanTailorAppleBackend/LayoutContactSheetRenderer.swift); `layout-sheet-NN.png`, ~40 DPI, facing pages touching; red = canonical frame, green = text block as placed, orange = outlier on its own canvas, blue label = low confidence; also `--layout-sheets` on a full run). **Measured on Flannery pp. 1–8: a stopped run took about as long as a full run (13 s vs 11–14 s)**: pass 1 dominates, so the real speed-up is 6.3.2 (caching); the stop is still useful because it needs no output PDF and is the quickest way to get the manifest and sheets.
+6. **`inspect`**: `inspect <manifest> --pages` prints one row per page (scan name, side, tier, page and text size, **margins L/T/R/B in inches**, skew, confidence, notes) plus the **margin spread of full-body pages per side** (the number to drive toward zero) and the list of own-canvas and low-confidence pages; `--json` gives the same rows (`PageRow`) for programs. (`--stop-after scan` from the plan was dropped: pass 2 costs almost nothing, so it would have saved nothing.)
+7. **Tests**: [`AdjustmentsTests.swift`](../Tests/ScanTailorCoreTests/AdjustmentsTests.swift) (15 tests, ~2 s: parsing and error reporting, nudge idempotency, offset, tier, drop, scan split, outlier scan names, page size, stop-after equals full-run plans, manifest coding, CLI loading) and a corpus test (SLE.2 scans 2–8: absolute scan numbers under `--page-range`, stopped run).
+8. **Known limitations**: (a) plain page numbers shift when blank pruning or `drop` changes the numbering: prefer scan names; (b) `pageSize` only rescales an outlier's PDF page (same aspect), it does not reflow; (c) no manual quadrangle in the file (use a full manifest's `sourcePageGeometry[].manualOverride`); (d) stopped runs still pay for pass 1 (6.3.2); (e) the contact sheet draws the cleaned bitmap cropped to the text block, not the exact rendered cluster mask; (f) margins in `inspect` are computed from the plan on the processing canvas (before any anti-billboard scaling); (g) a stored manifest's overrides are keyed by output page number, so an old manifest re-run after the numbering changed applies them to the wrong page (pre-existing).
+
 ---
 
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 6, Substep 6.3.1**, copy and provide the following prompt:
+To begin **Phase 6, Substep 6.3.2**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 6.3.1 — Manifest-Driven Per-Page Adjustments (`--apply-manifest`).
+We are resuming ScanTailorReborn on Substep 6.3.2 — Cache-Accelerated Re-Rendering.
 
 1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.11–3.13) and `docs/WHITE_PAPER.md` Phase 6, Step 6.3. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
-3. Propose a design for `--apply-manifest <path>`: which `PageManualOverride` / book-level fields an agent can edit (contentBox nudge, pageSize, margins, skew, splitCenter, dewarpDisable, tier, outlier pages), how edits are validated, and how it relates to the existing `existingManifest` re-run path. Pause for approval before implementing.
+2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.11–3.14) and `docs/WHITE_PAPER.md` Phase 6, Step 6.3. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
+3. Goal: an agent iterating with `--apply-manifest` / `--stop-after layout` should not pay for pass 1 (rasterize, rectify, split, deskew, dewarp, binarize, clean: about 1.3 s per 600 DPI scan) on every iteration. Propose a design: what to cache (per-scan cleaned 600 DPI bitmaps keyed by scan content + the options that affect them), where (a `--cache-dir`), how to invalidate (hash of scan, options, version), which adjustments force recomputation of a scan (skew, dewarp, split, geometry) and which only re-run the cheap tail (content box, tier, offset, outlier, margins, page size), and how to re-render only the changed pages. Measure first: time each stage on a real sample. Pause for approval before implementing.
 4. After approval, implement with tests, confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 6.3.2.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Phase 7.
 ```

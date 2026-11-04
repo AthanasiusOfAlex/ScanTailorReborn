@@ -20,6 +20,64 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
     public var verticalRegistration: VerticalRegistrationPolicy?
     /// Forces the page to be a canonical page or a dimensional outlier (`nil` is automatic; Substep 6.2.1).
     public var dimensionClass: DimensionClass?
+    /// Edge nudges applied to the detected content box, in 600 DPI pixels (positive moves an edge right or
+    /// down). Resolved into ``overrideContentBox`` during pass 1, so a stored record never carries it (Substep 6.3.1).
+    public var contentBoxNudge: ContentBoxNudge?
+    /// Moves the content by this many 600 DPI pixels after all automatic placement (Substep 6.3.1).
+    public var destinationOffset: Point2I?
+    /// Forces the page's layout tier (`nil` is automatic; Substep 6.3.1).
+    public var forcedTier: MarginHarmonizer.PlacementTier?
+    /// PDF page size in inches for an outlier that has its own canvas (Substep 6.3.1).
+    public var pageSizeInches: Size2D?
+    /// Never drop this page as blank (Substep 6.3.1).
+    public var keep: Bool?
+    /// Drop this page from the book (Substep 6.3.1).
+    public var drop: Bool?
+
+    /// Displacements of the four edges of a content box in pixels; positive moves an edge right or down.
+    public struct ContentBoxNudge: Sendable, Equatable, Codable {
+        public var top: Int
+        public var left: Int
+        public var bottom: Int
+        public var right: Int
+
+        public init(top: Int = 0, left: Int = 0, bottom: Int = 0, right: Int = 0) {
+            self.top = top
+            self.left = left
+            self.bottom = bottom
+            self.right = right
+        }
+
+        /// `box` with each edge moved, kept inside `bounds`; `nil` when nothing is left.
+        public func applied(to box: Rect2I, within bounds: Size2I) -> Rect2I? {
+            let minX = min(max(0, box.minX + left), bounds.width)
+            let maxX = min(max(0, box.maxX + right), bounds.width)
+            let minY = min(max(0, box.minY + top), bounds.height)
+            let maxY = min(max(0, box.maxY + bottom), bounds.height)
+            guard maxX > minX, maxY > minY else { return nil }
+            return Rect2I(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        }
+    }
+
+    /// `base` overlaid with the non-`nil` fields of `self` (used to let an adjustments file win over a stored manifest).
+    public func overlaid(on base: PageManualOverride?) -> PageManualOverride {
+        guard var r = base else { return self }
+        r.overrideSkewDegrees = overrideSkewDegrees ?? r.overrideSkewDegrees
+        r.disableDewarp = disableDewarp ?? r.disableDewarp
+        r.overrideContentBox = overrideContentBox ?? r.overrideContentBox
+        r.overrideDestinationOrigin = overrideDestinationOrigin ?? r.overrideDestinationOrigin
+        r.borderFallback = borderFallback ?? r.borderFallback
+        r.runningHeader = runningHeader ?? r.runningHeader
+        r.verticalRegistration = verticalRegistration ?? r.verticalRegistration
+        r.dimensionClass = dimensionClass ?? r.dimensionClass
+        r.contentBoxNudge = contentBoxNudge ?? r.contentBoxNudge
+        r.destinationOffset = destinationOffset ?? r.destinationOffset
+        r.forcedTier = forcedTier ?? r.forcedTier
+        r.pageSizeInches = pageSizeInches ?? r.pageSizeInches
+        r.keep = keep ?? r.keep
+        r.drop = drop ?? r.drop
+        return r
+    }
 
     public init(
         overrideSkewDegrees: Double? = nil,
@@ -29,8 +87,20 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
         borderFallback: BorderFallbackPolicy? = nil,
         runningHeader: RunningHeaderPolicy? = nil,
         verticalRegistration: VerticalRegistrationPolicy? = nil,
-        dimensionClass: DimensionClass? = nil
+        dimensionClass: DimensionClass? = nil,
+        contentBoxNudge: ContentBoxNudge? = nil,
+        destinationOffset: Point2I? = nil,
+        forcedTier: MarginHarmonizer.PlacementTier? = nil,
+        pageSizeInches: Size2D? = nil,
+        keep: Bool? = nil,
+        drop: Bool? = nil
     ) {
+        self.contentBoxNudge = contentBoxNudge
+        self.destinationOffset = destinationOffset
+        self.forcedTier = forcedTier
+        self.pageSizeInches = pageSizeInches
+        self.keep = keep
+        self.drop = drop
         self.dimensionClass = dimensionClass
         self.verticalRegistration = verticalRegistration
         self.borderFallback = borderFallback
@@ -196,6 +266,30 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     public var verticalRegistration: VerticalRegistrationSummary?
     /// Book-wide consensus-dimension summary (`nil` for manifests written before Substep 6.2.1).
     public var dimensionConsensus: DimensionConsensusSummary?
+    /// What the adjustments file did (`nil` when none was applied, and for manifests written before Substep 6.3.1).
+    public var adjustments: AdjustmentReport?
+    /// Scan number (1-based, counted from the start of the source PDF) of each processed scan, indexed like
+    /// ``PageProcessingRecord/sourcePageIndex`` (empty for manifests written before Substep 6.3.1, where the
+    /// scan number is `sourcePageIndex + 1`).
+    public var sourceScanNumbers: [Int]
+
+    /// Scan number of the scan a page came from.
+    public func scanNumber(of record: PageProcessingRecord) -> Int {
+        sourceScanNumbers.indices.contains(record.sourcePageIndex)
+            ? sourceScanNumbers[record.sourcePageIndex]
+            : record.sourcePageIndex + 1
+    }
+
+    /// The stable scan-based name of a page (`s12`, `s12L`, `s12R`) that an adjustments file can use.
+    public func scanReference(of record: PageProcessingRecord) -> String {
+        let half: String
+        switch record.splitSide {
+        case .single: half = ""
+        case .leftVerso: half = "L"
+        case .rightRecto: half = "R"
+        }
+        return "s\(scanNumber(of: record))\(half)"
+    }
 
     public init(
         processingDPI: Int,
@@ -216,8 +310,12 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         sourcePageGeometry: [SourcePageGeometryRecord] = [],
         runningHeaderModel: RunningHeaderModel? = nil,
         verticalRegistration: VerticalRegistrationSummary? = nil,
-        dimensionConsensus: DimensionConsensusSummary? = nil
+        dimensionConsensus: DimensionConsensusSummary? = nil,
+        adjustments: AdjustmentReport? = nil,
+        sourceScanNumbers: [Int] = []
     ) {
+        self.sourceScanNumbers = sourceScanNumbers
+        self.adjustments = adjustments
         self.dimensionConsensus = dimensionConsensus
         self.runningHeaderModel = runningHeaderModel
         self.verticalRegistration = verticalRegistration
@@ -259,6 +357,8 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case runningHeaderModel
         case verticalRegistration
         case dimensionConsensus
+        case adjustments
+        case sourceScanNumbers
     }
 
     public init(from decoder: Decoder) throws {
@@ -282,7 +382,16 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.runningHeaderModel = try container.decodeIfPresent(RunningHeaderModel.self, forKey: .runningHeaderModel)
         self.verticalRegistration = try container.decodeIfPresent(VerticalRegistrationSummary.self, forKey: .verticalRegistration)
         self.dimensionConsensus = try container.decodeIfPresent(DimensionConsensusSummary.self, forKey: .dimensionConsensus)
+        self.adjustments = try container.decodeIfPresent(AdjustmentReport.self, forKey: .adjustments)
+        self.sourceScanNumbers = try container.decodeIfPresent([Int].self, forKey: .sourceScanNumbers) ?? []
     }
+}
+
+/// A stage after which a run may stop early so an agent can inspect the result without paying for the whole book.
+public enum PipelineStop: String, Sendable, Equatable, Codable {
+    /// After page splitting, cleaning, content boxes, consensus sizes and the layout plans: the manifest and the
+    /// cleaned 600 DPI pages exist, but nothing is rendered at output resolution, recognized, or written to a PDF.
+    case layout
 }
 
 /// Coordinates the 3-pass automated book processing pipeline:
@@ -378,6 +487,12 @@ public struct BookPipelineCoordinator: Sendable {
         public var dimensionConsensusConfiguration: DimensionConsensus.Configuration
         /// Draw each dimensional outlier on its own PDF page size instead of the book's shared canvas (Substep 6.2.2).
         public var isolateOutlierCanvases: Bool
+        /// Per-scan and per-page edits from an adjustments file (`--apply-manifest`, Substep 6.3.1).
+        public var adjustments: PageAdjustments
+        /// Scan references (`s45L`) that join `dimensionConsensusConfiguration.manualOutlierPages` as the exact outlier list.
+        public var manualOutlierReferences: [PageReference]
+        /// Stops after the layout is decided (`--stop-after layout`): no pixels are rendered, recognized, or written.
+        public var stopAfter: PipelineStop?
 
         public init(
             processingDPI: Int = 600,
@@ -416,8 +531,14 @@ public struct BookPipelineCoordinator: Sendable {
             runningHeaderConfiguration: RunningHeaderDetector.Configuration = RunningHeaderDetector.Configuration(),
             verticalRegistrationConfiguration: VerticalRegistration.Configuration = VerticalRegistration.Configuration(),
             dimensionConsensusConfiguration: DimensionConsensus.Configuration = DimensionConsensus.Configuration(),
-            isolateOutlierCanvases: Bool = true
+            isolateOutlierCanvases: Bool = true,
+            adjustments: PageAdjustments = .empty,
+            manualOutlierReferences: [PageReference] = [],
+            stopAfter: PipelineStop? = nil
         ) {
+            self.adjustments = adjustments
+            self.manualOutlierReferences = manualOutlierReferences
+            self.stopAfter = stopAfter
             self.dimensionConsensusConfiguration = dimensionConsensusConfiguration
             self.isolateOutlierCanvases = isolateOutlierCanvases
             self.verticalRegistrationConfiguration = verticalRegistrationConfiguration
@@ -475,13 +596,17 @@ public struct BookPipelineCoordinator: Sendable {
         /// Per-page text-line profiles measured for running-header detection (empty when detection
         /// is disabled). Used for diagnostics (`--diagnostics-dir`).
         public let lineProfiles: [RunningHeaderDetector.PageLineProfile]
+        /// The stage the run stopped after (`nil` for a complete run). A stopped run has no `outputBitmapsAtOutputDPI`.
+        public let stoppedAfter: PipelineStop?
 
         public init(
             manifest: BookProcessingManifest,
             outputBitmapsAtOutputDPI: [BinaryBitmap],
             cleanedBitmapsAtProcessingDPI: [BinaryBitmap],
-            lineProfiles: [RunningHeaderDetector.PageLineProfile] = []
+            lineProfiles: [RunningHeaderDetector.PageLineProfile] = [],
+            stoppedAfter: PipelineStop? = nil
         ) {
+            self.stoppedAfter = stoppedAfter
             self.lineProfiles = lineProfiles
             self.manifest = manifest
             self.outputBitmapsAtOutputDPI = outputBitmapsAtOutputDPI
@@ -799,7 +924,8 @@ public struct BookPipelineCoordinator: Sendable {
             accelerator: accelerator,
             ocrEngine: ocrEngine,
             existingManifest: existingManifest,
-            preScaleDecisionFromReader: readerPreScaleDecision
+            preScaleDecisionFromReader: readerPreScaleDecision,
+            scanNumbers: activeSourceIndices.map { $0 + 1 }
         )
     }
 
@@ -836,7 +962,8 @@ public struct BookPipelineCoordinator: Sendable {
             accelerator: accelerator,
             ocrEngine: ocrEngine,
             existingManifest: existingManifest,
-            preScaleDecisionFromReader: nil
+            preScaleDecisionFromReader: nil,
+            scanNumbers: sourcePages.indices.map { $0 + 1 }
         )
     }
 
@@ -846,7 +973,8 @@ public struct BookPipelineCoordinator: Sendable {
         accelerator: any ComputeAccelerator,
         ocrEngine: (any OCREngine)?,
         existingManifest: BookProcessingManifest?,
-        preScaleDecisionFromReader: FontScaleAnalyzer.PreRasterScaleDecision?
+        preScaleDecisionFromReader: FontScaleAnalyzer.PreRasterScaleDecision?,
+        scanNumbers: [Int]
     ) async throws(PipelineError) -> PipelineOutput {
         let effectiveInputDPI = configuration.inputDPI ?? existingManifest?.inputDPI
         let effectivePageSize = configuration.targetPageSize ?? existingManifest?.pageSize
@@ -1135,12 +1263,36 @@ public struct BookPipelineCoordinator: Sendable {
             ? Set(dimensionConsensus.splitVetoes(sourceSizes: sourcePages.map { Size2I(width: $0.width, height: $0.height) }))
             : []
 
+        var resolver = AdjustmentResolver(
+            adjustments: configuration.adjustments,
+            scanNumbers: scanNumbers,
+            processingDPI: configuration.processingDPI
+        )
+        var splitScanNumbers: Set<Int> = []
+
         for (srcIdx, unrectifiedScan) in sourcePages.enumerated() {
+            let scanAdjustment = resolver.scanAdjustment(forScanAt: srcIdx)
+            var priorGeometry = priorGeometryBySourceIndex[srcIdx]
+            if let scanAdjustment, scanAdjustment.disableRectification != nil || scanAdjustment.disableDeskMask != nil {
+                var record = priorGeometry ?? SourcePageGeometryRecord(
+                    sourcePageIndex: srcIdx,
+                    rasterSize: Size2I(width: unrectifiedScan.width, height: unrectifiedScan.height),
+                    detection: nil,
+                    rectified: false,
+                    plan: nil
+                )
+                var geometryOverride = record.manualOverride ?? SourcePageGeometryOverride()
+                if let v = scanAdjustment.disableRectification { geometryOverride.disableRectification = v }
+                if let v = scanAdjustment.disableDeskMask { geometryOverride.disableDeskMask = v }
+                record.manualOverride = geometryOverride
+                priorGeometry = record
+            }
+
             // 0a. Document quadrangle detection & perspective rectification (desk excision).
             let (rectifiedScan, rectificationRecord) = rectifySourcePage(
                 unrectifiedScan,
                 sourcePageIndex: srcIdx,
-                priorRecord: priorGeometryBySourceIndex[srcIdx],
+                priorRecord: priorGeometry,
                 targetPageSize: effectivePageSize
             )
             // 0b. Residual desk/background masking (gutter wedges, crop-edge slivers, or the full
@@ -1148,10 +1300,23 @@ public struct BookPipelineCoordinator: Sendable {
             let (rawScan, geometryRecord) = maskDeskOfSourcePage(rectifiedScan, record: rectificationRecord)
             sourceGeometry.append(geometryRecord)
 
-            let splitDecision = PageSplitEstimator.estimateSplit(
-                in: rawScan,
-                mode: splitVetoedSources.contains(srcIdx) ? .singlePage : configuration.splitMode
-            )
+            let splitDecision: PageSplitDecision
+            if let scanAdjustment, let centerX = resolver.splitCenter(for: scanAdjustment, width: rawScan.width) {
+                // An exact cut from the adjustments file: a straight vertical line at the requested position.
+                splitDecision = PageSplitDecision(
+                    layoutType: .twoPageSpread,
+                    splitLine: GutterSplitLine(centerX: centerX, normalizedCenterX: centerX / Double(max(1, rawScan.width))),
+                    confidence: 1.0
+                )
+            } else {
+                let mode: PageSplitMode
+                if let forced = scanAdjustment?.split, forced != .automatic {
+                    mode = forced
+                } else {
+                    mode = splitVetoedSources.contains(srcIdx) ? .singlePage : configuration.splitMode
+                }
+                splitDecision = PageSplitEstimator.estimateSplit(in: rawScan, mode: mode)
+            }
             sourceSplits.append(splitDecision)
             let slices = PageSplitEstimator.split(
                 rawScan,
@@ -1159,9 +1324,26 @@ public struct BookPipelineCoordinator: Sendable {
                 gutterTrimWidth: effectiveGutterTrimWidth
             )
 
+            if slices.count > 1 { splitScanNumbers.insert(scanNumbers[srcIdx]) }
             for slice in slices {
                 let outIdx = pass1Pages.count
-                let manualOverride = overridesByOutputIndex[outIdx]
+                var manualOverride = resolver.override(
+                    outputIndex: outIdx,
+                    scanIndex: srcIdx,
+                    side: slice.side,
+                    base: overridesByOutputIndex[outIdx]
+                )
+                if manualOverride?.drop == true {
+                    prunedPages.append(
+                        PrunedPageRecord(
+                            sourcePageIndex: srcIdx,
+                            splitSide: slice.side,
+                            inkDensity: 0,
+                            reason: "Dropped by an adjustment (drop: true)"
+                        )
+                    )
+                    continue
+                }
 
                 let bookSide: MarginHarmonizer.PageSide
                 switch slice.side {
@@ -1253,6 +1435,18 @@ public struct BookPipelineCoordinator: Sendable {
                     dpi: configuration.processingDPI,
                     splitSide: slice.side
                 )
+                if let nudge = manualOverride?.contentBoxNudge {
+                    // Nudge the absolute box if one was given, otherwise the detected one; keep the result as an
+                    // absolute box so the stored override stays idempotent.
+                    if let base = manualOverride?.overrideContentBox ?? detection.contentBox,
+                       let nudged = nudge.applied(to: base, within: pageSize) {
+                        manualOverride?.overrideContentBox = nudged
+                        manualOverride?.contentBoxNudge = nil
+                    } else {
+                        resolver.note(page: outIdx, ignored: "contentBox.nudge", reason: "the page has no content box to nudge, or the nudge removes it")
+                        manualOverride?.contentBoxNudge = nil
+                    }
+                }
                 if let customBox = manualOverride?.overrideContentBox {
                     let customCluster = ContentBoxDetector.Cluster(
                         exactBounds: customBox,
@@ -1389,23 +1583,56 @@ public struct BookPipelineCoordinator: Sendable {
                 forcedClass: p.manualOverride?.dimensionClass
             )
         }
-        var dimensionResult = dimensionConsensus.classify(pages: dimensionInputs)
+        // The exact outlier list is the plain page numbers plus any scan references (`s45L`), resolved now that
+        // the output pages exist. Either one switches automatic detection off completely.
+        var classifier = dimensionConsensus
+        var unresolvedOutlierReferences: [PageReference] = []
+        if !configuration.manualOutlierReferences.isEmpty {
+            var manual = configuration.dimensionConsensusConfiguration.manualOutlierPages ?? []
+            for reference in configuration.manualOutlierReferences {
+                let matches = pass1Pages.filter { p in
+                    switch reference {
+                    case .outputPage(let n): return p.outputPageIndex == n - 1
+                    case .scan(let n, let half):
+                        guard scanNumbers[p.sourcePageIndex] == n else { return false }
+                        switch (half, p.splitSide) {
+                        case (.whole, _), (.left, .leftVerso), (.right, .rightRecto): return true
+                        default: return false
+                        }
+                    }
+                }
+                if matches.isEmpty { unresolvedOutlierReferences.append(reference) }
+                manual.formUnion(matches.map(\.outputPageIndex))
+            }
+            var consensusConfiguration = configuration.dimensionConsensusConfiguration
+            consensusConfiguration.manualOutlierPages = manual
+            classifier = DimensionConsensus(configuration: consensusConfiguration)
+        }
+        var dimensionResult = classifier.classify(pages: dimensionInputs)
         dimensionResult.summary.splitVetoedSourcePages = splitVetoedSources.sorted()
         var outlierCanvasSizes: [Int: Size2I] = [:]
         for (input, record) in zip(dimensionInputs, dimensionResult.records) {
             if let size = record.proposedCanvasSize { outlierCanvasSizes[input.pageIndex] = size }
         }
 
+        var forcedTiers: [Int: MarginHarmonizer.PlacementTier] = [:]
+        for p in pass1Pages {
+            if let tier = p.manualOverride?.forcedTier { forcedTiers[p.outputPageIndex] = tier }
+        }
+        let isManualOutlierList = configuration.dimensionConsensusConfiguration.manualOutlierPages != nil
+            || !configuration.manualOutlierReferences.isEmpty
         let bookLayout = harmonizer.harmonizeBook(
             pages: harmonizerInputs,
             detector: contentDetector,
             dimensionOutliers: dimensionResult.outlierPageIndices,
             outlierCanvasSizes: outlierCanvasSizes,
-            minimumCanonicalPages: configuration.dimensionConsensusConfiguration.manualOutlierPages != nil ? 1 : 3
+            minimumCanonicalPages: isManualOutlierList ? 1 : 3,
+            forcedTiers: forcedTiers
         )
         if let manual = configuration.dimensionConsensusConfiguration.manualOutlierPages {
             dimensionResult.summary.ignoredManualPages = manual.filter { $0 >= pass1Pages.count }.sorted().map { $0 + 1 }
         }
+        dimensionResult.summary.ignoredManualReferences = unresolvedOutlierReferences.map(\.description)
 
         // --- PASS 3: Canonical Framing, 600 -> 300 DPI Downsampling, OCR & 1-Bit PDF Assembly ---
         var records: [PageProcessingRecord] = []
@@ -1425,6 +1652,7 @@ public struct BookPipelineCoordinator: Sendable {
         var clampedCanonicalInches: Size2D? = nil
 
         let shouldDownsample2x = (configuration.processingDPI >= configuration.outputDPI * 2)
+        let stopsAfterLayout = (configuration.stopAfter == .layout)
         let sampledGlyphPageIndices = Self.selectEvenlySampledIndices(from: pass1Pages.count, maxSamples: 16)
         var postCalibrationGlyphMetrics: [FontScaleAnalyzer.PageGlyphMetrics] = []
         postCalibrationGlyphMetrics.reserveCapacity(sampledGlyphPageIndices.count)
@@ -1501,16 +1729,22 @@ public struct BookPipelineCoordinator: Sendable {
                 isolatedCanvas = true
             }
 
-            let framed600 = harmonizer.renderPage(from: p1.cleanedBitmap, plan: plan)
-            let finalBitmap: BinaryBitmap
-            if shouldDownsample2x {
-                finalBitmap = accelerator.downsampleBinaryTo300DPI(framed600)
-            } else {
-                finalBitmap = framed600
+            // A manual shift of the content (`offset`), applied after every automatic placement rule.
+            if let offset = p1.manualOverride?.destinationOffset {
+                plan.destinationOrigin = Point2I(x: plan.destinationOrigin.x + offset.x, y: plan.destinationOrigin.y + offset.y)
+            }
+
+            // A run that stops after the layout renders nothing: the page sizes below come from the plan alone.
+            var framed600: BinaryBitmap? = nil
+            var renderedBitmap: BinaryBitmap? = nil
+            if !stopsAfterLayout {
+                let framed = harmonizer.renderPage(from: p1.cleanedBitmap, plan: plan)
+                framed600 = framed
+                renderedBitmap = shouldDownsample2x ? accelerator.downsampleBinaryTo300DPI(framed) : framed
             }
 
             var ocrObservations: [RecognizedTextObservation] = []
-            if let ocrEngine {
+            if let ocrEngine, let finalBitmap = renderedBitmap {
                 do {
                     ocrObservations = try await ocrEngine.recognizeText(
                         in: finalBitmap,
@@ -1523,7 +1757,7 @@ public struct BookPipelineCoordinator: Sendable {
             }
 
             let shouldCollectScaleTelemetry = configuration.enableAutomaticFontScaleCalibration || (effectivePreScaleDecision != nil)
-            if shouldCollectScaleTelemetry && sampledGlyphPageIndices.contains(idx) && !plan.isDimensionOutlier {
+            if shouldCollectScaleTelemetry && sampledGlyphPageIndices.contains(idx) && !plan.isDimensionOutlier, let framed600 {
                 if let glyphMetrics = fontScaleAnalyzer.analyzePage(
                     in: framed600,
                     declaredDPI: configuration.processingDPI,
@@ -1533,8 +1767,10 @@ public struct BookPipelineCoordinator: Sendable {
                 }
             }
 
-            var pageWidthPoints = Double(finalBitmap.width) * 72.0 / Double(configuration.outputDPI)
-            var pageHeightPoints = Double(finalBitmap.height) * 72.0 / Double(configuration.outputDPI)
+            let outputWidthPixels = renderedBitmap?.width ?? max(1, shouldDownsample2x ? plan.canvasSize.width / 2 : plan.canvasSize.width)
+            let outputHeightPixels = renderedBitmap?.height ?? max(1, shouldDownsample2x ? plan.canvasSize.height / 2 : plan.canvasSize.height)
+            var pageWidthPoints = Double(outputWidthPixels) * 72.0 / Double(configuration.outputDPI)
+            var pageHeightPoints = Double(outputHeightPixels) * 72.0 / Double(configuration.outputDPI)
             if isolatedCanvas {
                 pageWidthPoints *= canonicalClampScale
                 pageHeightPoints *= canonicalClampScale
@@ -1565,17 +1801,36 @@ public struct BookPipelineCoordinator: Sendable {
                     }
                 }
             }
+            if let wanted = p1.manualOverride?.pageSizeInches {
+                // An outlier's own page size: the picture is scaled uniformly, so the aspect ratio must match.
+                let aspect = pageWidthPoints / max(1, pageHeightPoints)
+                let wantedAspect = wanted.width / max(0.001, wanted.height)
+                if !isolatedCanvas {
+                    resolver.note(page: p1.outputPageIndex, ignored: "pageSize", reason: "only an outlier page that has its own canvas can change its page size")
+                } else if abs(wantedAspect - aspect) / aspect > 0.05 {
+                    resolver.note(
+                        page: p1.outputPageIndex,
+                        ignored: "pageSize",
+                        reason: String(format: "the requested shape (%.2f×%.2f in) differs from the page's (%.2f×%.2f in); give the same aspect ratio", wanted.width, wanted.height, pageWidthPoints / 72, pageHeightPoints / 72)
+                    )
+                } else {
+                    pageWidthPoints = wanted.width * 72.0
+                    pageHeightPoints = wanted.height * 72.0
+                }
+            }
             let pageBoxPoints = Rect2D(x: 0, y: 0, width: pageWidthPoints, height: pageHeightPoints)
 
-            do {
-                try writer.appendPage(
-                    bitmap: finalBitmap,
-                    dpi: configuration.outputDPI,
-                    pageBoxPoints: pageBoxPoints,
-                    ocrLayer: ocrObservations
-                )
-            } catch {
-                throw .pdfWriteFailed(error)
+            if let finalBitmap = renderedBitmap {
+                do {
+                    try writer.appendPage(
+                        bitmap: finalBitmap,
+                        dpi: configuration.outputDPI,
+                        pageBoxPoints: pageBoxPoints,
+                        ocrLayer: ocrObservations
+                    )
+                } catch {
+                    throw .pdfWriteFailed(error)
+                }
             }
 
             var dimensionRecord = dimensionResult.records[idx]
@@ -1611,14 +1866,16 @@ public struct BookPipelineCoordinator: Sendable {
                     dimension: dimensionRecord
                 )
             )
-            outputBitmaps.append(finalBitmap)
+            if let renderedBitmap { outputBitmaps.append(renderedBitmap) }
             cleanedBitmaps.append(p1.cleanedBitmap)
         }
 
-        do {
-            try writer.finalize()
-        } catch {
-            throw .pdfWriteFailed(error)
+        if !stopsAfterLayout {
+            do {
+                try writer.finalize()
+            } catch {
+                throw .pdfWriteFailed(error)
+            }
         }
 
         let rawCanonicalInches = Size2D(
@@ -1655,6 +1912,14 @@ public struct BookPipelineCoordinator: Sendable {
         var finalDimensionSummary = dimensionResult.summary
         finalDimensionSummary.isolatedCanvasPages = isolatedOutputPages
 
+        let adjustmentReport: AdjustmentReport? = resolver.isActive
+            ? resolver.report(
+                outputPageCount: pass1Pages.count,
+                producedScans: Set(pass1Pages.map { scanNumbers[$0.sourcePageIndex] }),
+                splitScans: splitScanNumbers
+            )
+            : nil
+
         let manifest = BookProcessingManifest(
             processingDPI: configuration.processingDPI,
             outputDPI: configuration.outputDPI,
@@ -1674,14 +1939,17 @@ public struct BookPipelineCoordinator: Sendable {
             sourcePageGeometry: sourceGeometry,
             runningHeaderModel: runningHeaderModel,
             verticalRegistration: registrationSummary,
-            dimensionConsensus: finalDimensionSummary
+            dimensionConsensus: finalDimensionSummary,
+            adjustments: adjustmentReport,
+            sourceScanNumbers: scanNumbers
         )
 
         return PipelineOutput(
             manifest: manifest,
             outputBitmapsAtOutputDPI: outputBitmaps,
             cleanedBitmapsAtProcessingDPI: cleanedBitmaps,
-            lineProfiles: lineProfiles
+            lineProfiles: lineProfiles,
+            stoppedAfter: configuration.stopAfter
         )
     }
 

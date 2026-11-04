@@ -32,10 +32,11 @@ public struct ScanTailorCLI {
         case missingPositional(String)
         case invalidOptionValue(flag: String, value: String)
         case executionFailed(String)
+        case invalidCombination(String)
 
         public var showUsage: Bool {
             switch self {
-            case .missingCommand, .unknownCommand, .missingValue, .unknownOption, .missingPositional, .invalidOptionValue:
+            case .missingCommand, .unknownCommand, .missingValue, .unknownOption, .missingPositional, .invalidOptionValue, .invalidCombination:
                 return true
             case .executionFailed:
                 return false
@@ -57,6 +58,8 @@ public struct ScanTailorCLI {
             case .invalidOptionValue(let flag, let value):
                 return "Invalid value '\(value)' for option '\(flag)'."
             case .executionFailed(let message):
+                return message
+            case .invalidCombination(let message):
                 return message
             }
         }
@@ -102,6 +105,18 @@ public struct ScanTailorCLI {
         /// Exact outlier pages, 1-based output pages (`--outlier-pages`); `nil` is automatic, empty is "none".
         public var outlierPages: Set<Int>? = nil
         public var isolateOutlierCanvases: Bool = true
+        /// Scan references (`s45L`) in `--outlier-pages`; they join `outlierPages` as the exact outlier list.
+        public var outlierScanRefs: [PageReference] = []
+        /// Adjustments file (`--apply-manifest`): per-scan and per-page edits, plus a `book` section of options.
+        public var applyManifestPath: String? = nil
+        /// The adjustments read from `applyManifestPath` (filled in by ``loadAdjustments(into:arguments:)``).
+        public var adjustments: PageAdjustments = .empty
+        /// A complete earlier manifest given to `--apply-manifest` (read-only; its per-page overrides are applied).
+        public var priorManifestPath: String? = nil
+        /// Stop early (`--stop-after layout`): no output PDF, OCR or rendering.
+        public var stopAfter: PipelineStop? = nil
+        /// Write layout contact sheets into the diagnostics directory (`--layout-sheets`; automatic with `--stop-after`).
+        public var layoutSheets: Bool = false
 
         public init(inputPDFPath: String, outputPDFPath: String) {
             self.inputPDFPath = inputPDFPath
@@ -122,7 +137,7 @@ public struct ScanTailorCLI {
         let remaining = Array(arguments.dropFirst())
         switch first {
         case "process":
-            let options = try parseProcessOptions(remaining)
+            let options = try loadAdjustments(into: try parseProcessOptions(remaining), arguments: remaining)
             try await executeProcess(options)
         case "inspect":
             try executeInspect(remaining)
@@ -163,6 +178,10 @@ public struct ScanTailorCLI {
         var outlierTolerance = 0.08
         var outlierPages: Set<Int>? = nil
         var isolateOutlierCanvases = true
+        var outlierScanRefs: [PageReference] = []
+        var applyManifestPath: String? = nil
+        var stopAfter: PipelineStop? = nil
+        var layoutSheets = false
 
         var i = 0
         while i < args.count {
@@ -348,11 +367,26 @@ public struct ScanTailorCLI {
                 i += 2
             case "--outlier-pages":
                 guard i + 1 < args.count else { throw .missingValue(flag: arg) }
-                guard let list = Self.parseOutlierPages(args[i + 1]) else {
+                guard let spec = Self.parseOutlierSpec(args[i + 1]) else {
                     throw .invalidOptionValue(flag: arg, value: args[i + 1])
                 }
-                outlierPages = list
+                outlierPages = (spec.pages.isEmpty && !spec.scans.isEmpty) ? nil : spec.pages
+                outlierScanRefs = spec.scans
                 i += 2
+            case "--apply-manifest", "--adjustments":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                applyManifestPath = args[i + 1]
+                i += 2
+            case "--stop-after":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let stage = PipelineStop(rawValue: args[i + 1].lowercased()) else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                stopAfter = stage
+                i += 2
+            case "--layout-sheets":
+                layoutSheets = true
+                i += 1
             case "--outlier-canvas":
                 guard i + 1 < args.count else { throw .missingValue(flag: arg) }
                 switch args[i + 1].lowercased() {
@@ -397,8 +431,18 @@ public struct ScanTailorCLI {
         guard let validInput = inputPath else {
             throw .missingPositional("input-pdf")
         }
+        if outputPath == nil, stopAfter != nil {
+            // A stopped run writes no PDF; the name only gives the manifest and diagnostics their stem.
+            outputPath = ((validInput as NSString).deletingPathExtension) + "-layout.pdf"
+        }
         guard let validOutput = outputPath else {
             throw .missingPositional("output-pdf (-o)")
+        }
+        if stopAfter != nil && manifestPath == nil && diagnosticsDirPath == nil {
+            throw .invalidCombination("--stop-after writes no PDF, so it needs --manifest <path.json> or --diagnostics-dir <dir> to keep its results.")
+        }
+        if layoutSheets && diagnosticsDirPath == nil {
+            throw .invalidCombination("--layout-sheets needs --diagnostics-dir <dir> to hold the sheets.")
         }
 
         var opts = ProcessOptions(inputPDFPath: validInput, outputPDFPath: validOutput)
@@ -431,6 +475,10 @@ public struct ScanTailorCLI {
         opts.outlierTolerance = outlierTolerance
         opts.outlierPages = outlierPages
         opts.isolateOutlierCanvases = isolateOutlierCanvases
+        opts.outlierScanRefs = outlierScanRefs
+        opts.applyManifestPath = applyManifestPath
+        opts.stopAfter = stopAfter
+        opts.layoutSheets = layoutSheets || (stopAfter != nil && diagnosticsDirPath != nil)
         return opts
     }
 
@@ -480,13 +528,6 @@ public struct ScanTailorCLI {
             throw CLIError.executionFailed("Failed to open input PDF '\(inputURL.path)': \(error)")
         }
 
-        let writer: ApplePDFDocumentWriter
-        do {
-            writer = try ApplePDFDocumentWriter(destinationURL: outputURL)
-        } catch {
-            throw CLIError.executionFailed("Failed to initialize output PDF '\(outputURL.path)': \(error)")
-        }
-
         let accelerator: any ComputeAccelerator = options.usePortableBackend
             ? PortableComputeAccelerator()
             : MetalComputeAccelerator()
@@ -499,6 +540,12 @@ public struct ScanTailorCLI {
             let data = try Data(contentsOf: manifestURL)
             existingManifest = try JSONDecoder().decode(BookProcessingManifest.self, from: data)
             print("Loaded existing manifest from \(manifestURL.path)")
+        }
+        if let priorPath = options.priorManifestPath {
+            // A complete manifest given to --apply-manifest: its per-page overrides are applied (read-only).
+            let data = try Data(contentsOf: URL(fileURLWithPath: priorPath))
+            existingManifest = try JSONDecoder().decode(BookProcessingManifest.self, from: data)
+            print("Applying per-page overrides from manifest \(priorPath)")
         }
 
         let binConfig = AdaptiveBinarizer.Configuration(
@@ -534,7 +581,10 @@ public struct ScanTailorCLI {
                 toleranceFraction: options.outlierTolerance,
                 manualOutlierPages: options.outlierPages.map { Set($0.map { $0 - 1 }) }
             ),
-            isolateOutlierCanvases: options.isolateOutlierCanvases
+            isolateOutlierCanvases: options.isolateOutlierCanvases,
+            adjustments: options.adjustments,
+            manualOutlierReferences: options.outlierScanRefs,
+            stopAfter: options.stopAfter
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -542,17 +592,41 @@ public struct ScanTailorCLI {
 
         let result: BookPipelineCoordinator.PipelineOutput
         do {
-            result = try await coordinator.processBook(
-                reader: reader,
-                writer: writer,
-                accelerator: accelerator,
-                ocrEngine: ocrEngine,
-                existingManifest: existingManifest
-            ) { completed, total in
-                print("  Rasterized source page \(completed)/\(total) at 600 DPI")
+            if options.stopAfter != nil {
+                result = try await coordinator.processBook(
+                    reader: reader,
+                    writer: DiscardingPDFWriter(),
+                    accelerator: accelerator,
+                    ocrEngine: ocrEngine,
+                    existingManifest: existingManifest
+                ) { completed, total in
+                    print("  Rasterized source page \(completed)/\(total) at 600 DPI")
+                }
+            } else {
+                let writer: ApplePDFDocumentWriter
+                do {
+                    writer = try ApplePDFDocumentWriter(destinationURL: outputURL)
+                } catch {
+                    throw CLIError.executionFailed("Failed to initialize output PDF '\(outputURL.path)': \(error)")
+                }
+                result = try await coordinator.processBook(
+                    reader: reader,
+                    writer: writer,
+                    accelerator: accelerator,
+                    ocrEngine: ocrEngine,
+                    existingManifest: existingManifest
+                ) { completed, total in
+                    print("  Rasterized source page \(completed)/\(total) at 600 DPI")
+                }
             }
+        } catch let error as CLIError {
+            throw error
         } catch {
             throw CLIError.executionFailed("Pipeline failed: \(error)")
+        }
+
+        if let report = result.manifest.adjustments {
+            print(Self.formatAdjustmentReport(report))
         }
 
         if result.manifest.physicalScaleAmbiguous {
@@ -631,7 +705,32 @@ public struct ScanTailorCLI {
             }
         }
 
+        if options.layoutSheets, let diagDir = options.diagnosticsDirPath {
+            let diagDirURL = URL(fileURLWithPath: diagDir)
+            try FileManager.default.createDirectory(at: diagDirURL, withIntermediateDirectories: true)
+            do {
+                let sheets = try LayoutContactSheetRenderer().renderSheets(
+                    manifest: result.manifest,
+                    cleanedBitmaps: result.cleanedBitmapsAtProcessingDPI
+                )
+                for (n, data) in sheets.enumerated() {
+                    try data.write(to: diagDirURL.appendingPathComponent(String(format: "layout-sheet-%02d.png", n + 1)), options: .atomic)
+                }
+                print("Wrote \(sheets.count) layout contact sheet(s) to \(diagDirURL.path)")
+            } catch {
+                throw CLIError.executionFailed("Failed to write layout contact sheets: \(error)")
+            }
+        }
+
         let flaggedPages = result.manifest.pages.filter(\.flaggedLowConfidence)
+        if options.stopAfter != nil {
+            print("Stopped after the layout: \(result.manifest.pages.count) page(s) planned; no PDF was written. Inspect with: scantailor-cli inspect <manifest.json> --pages")
+            if !flaggedPages.isEmpty {
+                let indices = flaggedPages.map { String($0.outputPageIndex + 1) }.joined(separator: ", ")
+                print("WARNING: \(flaggedPages.count) page(s) had confidence below threshold: [\(indices)]")
+            }
+            return
+        }
         print("Completed: wrote \(result.manifest.pages.count) page(s) at \(result.manifest.outputDPI) DPI to \(outputURL.path)")
         if !flaggedPages.isEmpty {
             let indices = flaggedPages.map { String($0.outputPageIndex + 1) }.joined(separator: ", ")
@@ -643,28 +742,98 @@ public struct ScanTailorCLI {
         guard let manifestPath = args.first, !manifestPath.hasPrefix("-") else {
             throw CLIError.missingPositional("manifest-json")
         }
+        var table = false
+        var json = false
+        for flag in args.dropFirst() {
+            switch flag {
+            case "--pages": table = true
+            case "--json": json = true
+            default: throw CLIError.unknownOption(flag)
+            }
+        }
         let url = URL(fileURLWithPath: manifestPath)
         let data = try Data(contentsOf: url)
         let manifest = try JSONDecoder().decode(BookProcessingManifest.self, from: data)
-        print(formatManifestSummary(manifest))
+        if json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            print(String(decoding: try encoder.encode(pageRows(manifest)), as: UTF8.self))
+        } else if table {
+            print(formatPageTable(manifest))
+        } else {
+            print(formatManifestSummary(manifest))
+        }
     }
 
-    /// Parses `--outlier-pages`: `none`, or comma-separated 1-based pages and ranges such as `1,45,89-91`.
-    static func parseOutlierPages(_ text: String) -> Set<Int>? {
+    /// Reads the `--apply-manifest` file, if any, into `options`: its `book` section becomes ordinary options
+    /// (the command line still wins), and its `scans` and `pages` sections become the run's adjustments.
+    ///
+    /// A complete manifest written by an earlier run is also accepted; its per-page overrides are then applied.
+    public static func loadAdjustments(into options: ProcessOptions, arguments: [String]) throws -> ProcessOptions {
+        guard let path = options.applyManifestPath else { return options }
+        let url = URL(fileURLWithPath: path)
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw CLIError.executionFailed("Cannot read the adjustments file '\(url.path)': \(error.localizedDescription)")
+        }
+        if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           root["processingDPI"] != nil, root["pages"] is [Any] {
+            var updated = options
+            updated.priorManifestPath = path
+            return updated
+        }
+        let adjustments: PageAdjustments
+        do {
+            adjustments = try PageAdjustments.parse(data, source: url.path)
+        } catch {
+            throw CLIError.executionFailed("\(url.lastPathComponent): \(error)")
+        }
+        // File options come first so that anything on the command line overrides them.
+        var updated = try parseProcessOptions(adjustments.bookArguments + arguments)
+        updated.adjustments = adjustments
+        return updated
+    }
+
+    /// Parses `--outlier-pages`: `none`, or comma-separated 1-based output pages, ranges (`89-91`) and scan
+    /// references (`s45`, `s45L`, `s45R`), for example `1,45,89-91,s120L`.
+    static func parseOutlierSpec(_ text: String) -> (pages: Set<Int>, scans: [PageReference])? {
         let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
-        if trimmed == "none" { return [] }
-        var result: Set<Int> = []
+        if trimmed == "none" { return ([], []) }
+        var pages: Set<Int> = []
+        var scans: [PageReference] = []
         for part in trimmed.split(separator: ",", omittingEmptySubsequences: false) {
-            let bounds = part.split(separator: "-", omittingEmptySubsequences: false).map { Int($0.trimmingCharacters(in: .whitespaces)) }
+            let token = part.trimmingCharacters(in: .whitespaces)
+            if token.hasPrefix("s") {
+                guard let reference = PageReference(token), case .scan = reference else { return nil }
+                scans.append(reference)
+                continue
+            }
+            let bounds = token.split(separator: "-", omittingEmptySubsequences: false).map { Int($0.trimmingCharacters(in: .whitespaces)) }
             if bounds.count == 1, let n = bounds[0], n >= 1 {
-                result.insert(n)
+                pages.insert(n)
             } else if bounds.count == 2, let lo = bounds[0], let hi = bounds[1], lo >= 1, lo <= hi, hi - lo < 100_000 {
-                result.formUnion(lo...hi)
+                pages.formUnion(lo...hi)
             } else {
                 return nil
             }
         }
-        return result.isEmpty ? nil : result
+        return (pages.isEmpty && scans.isEmpty) ? nil : (pages, scans)
+    }
+
+    /// A short, readable account of what an adjustments file did.
+    public static func formatAdjustmentReport(_ report: AdjustmentReport) -> String {
+        var lines = ["Adjustments\(report.source.map { " (\($0))" } ?? ""): \(report.applied.count) applied, \(report.ignored.count) ignored"]
+        for entry in report.applied.prefix(40) {
+            lines.append("  applied  \(entry.reference): \(entry.fields.joined(separator: ", "))")
+        }
+        if report.applied.count > 40 { lines.append("  … and \(report.applied.count - 40) more applied") }
+        for entry in report.ignored.prefix(40) {
+            lines.append("  IGNORED  \(entry.reference): \(entry.reason)")
+        }
+        if report.ignored.count > 40 { lines.append("  … and \(report.ignored.count - 40) more ignored") }
+        return lines.joined(separator: "\n")
     }
 
     private static func percent(_ fraction: Double) -> String {
@@ -757,6 +926,9 @@ public struct ScanTailorCLI {
                 }
                 if !described.isEmpty { text += " (" + described.prefix(6).joined(separator: "; ") + (described.count > 6 ? "; …" : "") + ")" }
                 if consensus.note == "manualList" { text += " | manual list" }
+                if !consensus.ignoredManualReferences.isEmpty {
+                    text += " | ignored (no such page): " + consensus.ignoredManualReferences.joined(separator: ",")
+                }
                 if !consensus.ignoredManualPages.isEmpty {
                     text += " | ignored (not in book): " + consensus.ignoredManualPages.map(String.init).joined(separator: ",")
                 }
@@ -766,6 +938,9 @@ public struct ScanTailorCLI {
                 }
                 lines.append(text)
             }
+        }
+        if let report = manifest.adjustments {
+            lines.append(formatAdjustmentReport(report))
         }
         if manifest.physicalScaleAmbiguous {
             lines.append("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true) — escalate to user for --page-size (octavo, trade-paperback, a5, a4, letter) or --input-dpi")
@@ -801,7 +976,7 @@ public struct ScanTailorCLI {
         if !manifest.prunedPages.isEmpty {
             lines.append("Pruned Blank Sub-Pages: \(manifest.prunedPages.count)")
             for pruned in manifest.prunedPages {
-                lines.append("  - Source scan #\(pruned.sourcePageIndex + 1) (\(pruned.splitSide.rawValue)): \(pruned.reason)")
+                lines.append("  - Source scan #\(manifest.sourceScanNumbers.indices.contains(pruned.sourcePageIndex) ? manifest.sourceScanNumbers[pruned.sourcePageIndex] : pruned.sourcePageIndex + 1) (\(pruned.splitSide.rawValue)): \(pruned.reason)")
             }
         }
         lines.append("-----------------------------------------")
@@ -810,7 +985,7 @@ public struct ScanTailorCLI {
             let dewarpStr = page.dewarpApplied ? String(format: "yes (sag %.1fpx)", page.dewarpVerticalSagPixels) : "bypass"
             let confStr = String(format: "%.2f", page.overallConfidence)
             let flagStr = page.flaggedLowConfidence ? " [FLAGGED]" : ""
-            lines.append("Page \(page.outputPageIndex + 1) (src #\(page.sourcePageIndex + 1), \(page.bookSide.rawValue)): tier=\(page.layoutPlan.tier.rawValue), skew=\(skewStr), dewarp=\(dewarpStr), conf=\(confStr)\(flagStr)")
+            lines.append("Page \(page.outputPageIndex + 1) (\(manifest.scanReference(of: page)), \(page.bookSide.rawValue)): tier=\(page.layoutPlan.tier.rawValue), skew=\(skewStr), dewarp=\(dewarpStr), conf=\(confStr)\(flagStr)")
         }
         return lines.joined(separator: "\n")
     }
@@ -818,10 +993,16 @@ public struct ScanTailorCLI {
     public static let usageText = """
     USAGE:
       scantailor-cli process <input.pdf> -o <output.pdf> [options]
-      scantailor-cli inspect <manifest.json>
+      scantailor-cli inspect <manifest.json> [--pages] [--json]
 
     PROCESS OPTIONS:
-      -o, --output <path>          Output 300 DPI 1-bit searchable PDF path (required)
+      -o, --output <path>          Output 300 DPI 1-bit searchable PDF path (required unless --stop-after)
+      --apply-manifest <file>      Apply an adjustments file (JSON) of per-scan and per-page edits; its "book" section
+                                   holds ordinary options (flags on the command line win). A complete manifest from an
+                                   earlier run is also accepted. See "ADJUSTMENTS FILE" below.
+      --stop-after layout          Plan the layout but render, recognize and write nothing (needs --manifest or
+                                   --diagnostics-dir); writes layout contact sheets into the diagnostics directory
+      --layout-sheets              Also write layout contact sheets on a complete run
       --manifest <path.json>       Read/write JSON processing manifest (supports per-page overrides)
       --diagnostics-dir <dir>      Directory for manifest and PNG diagnostic overlays
       --all-diagnostics            Render PNG diagnostic overlays for all pages (not just low-confidence)
@@ -846,7 +1027,8 @@ public struct ScanTailorCLI {
                                    header or first body baseline) or box-top (legacy; align content-box tops)
       --dimension-consensus <mode> Group pages by size: auto (default; covers, plates and foldouts of a different size
                                    are kept out of the book's page size) or off
-      --outlier-pages <list|none>  Exact outlier pages (1-based output pages, e.g. 1,45,89-91,120); overrides detection
+      --outlier-pages <list|none>  Exact outlier pages (1-based output pages and scans, e.g. 1,45,89-91,s120L);
+                                   overrides automatic detection completely
       --outlier-canvas <mode>      isolated (default: each outlier gets its own page size) or shared
       --outlier-tolerance <frac>   Relative size difference that makes a page an outlier (default 0.08)
       --no-running-headers         Disable running-header detection (and with it, vertical registration)
@@ -856,5 +1038,35 @@ public struct ScanTailorCLI {
                                    (aliases: --languages, --ocr-lang)
       --tessdata-dir <path>        Custom tessdata directory containing .traineddata files
       --portable-backend           Use pure-Swift portable compute accelerator instead of Metal GPU
+
+    ITERATING (agent or human):
+      1. scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/     (fast: no PDF, no OCR)
+      2. scantailor-cli inspect d/book-layout-manifest.json --pages                   (sizes and margins per page)
+         and look at d/layout-sheet-01.png ...                                        (red: canonical frame,
+                                                                                       green: text block, orange: outlier)
+      3. Write adjustments.json, then repeat step 1 with --apply-manifest adjustments.json
+      4. When satisfied, run without --stop-after to write the PDF.
+
+    ADJUSTMENTS FILE (--apply-manifest; strict JSON; keys starting with "_" and "note" are ignored):
+      {
+        "version": 1,
+        "book":  { "page-size": "octavo", "margins": "0.75in", "outlier-pages": "1,s45L" },
+        "scans": { "s12": { "split": "single" }, "s30": { "splitX": "52%", "disableRectification": true } },
+        "pages": { "s45L": { "skew": -0.4, "contentBox": { "nudge": { "top": "-2mm", "bottom": "+0.1in" } } },
+                   "77":   { "tier": "standaloneFloating", "keep": true },
+                   "s88":  { "contentBox": { "rect": ["1.0in", "1.2in", "4.1in", "6.6in"] }, "offset": { "y": "+1mm" } } }
+      }
+      Page names: "45" is output page 45 of the run you are looking at; "s12" is scan 12 of the source PDF (counted
+      from the start of the PDF, even with --page-range); "s12L" / "s12R" are the left / right half of a split scan.
+      Prefer scan names: they survive changes in splitting or pruning. More specific names win ("s12L" over "s12").
+      scans: split ("single"|"spread"|"auto"), splitX ("52%" or a length), disableRectification, disableDeskMask.
+      pages: skew (degrees), disableDewarp, contentBox.rect [left, top, right, bottom], contentBox.nudge {top,left,
+             bottom,right} (positive moves an edge right/down), offset {x,y}, tier (fullBody|edgeAnchoredPartial|
+             standaloneFloating), outlier (true|false), pageSize (outlier's own page size, same aspect), keep, drop,
+             runningHeader (automatic|present|absent), verticalRegistration (automatic|anchor|boxTop),
+             borderFallback (automatic|forced|disabled).
+      Lengths need a unit: in, mm, cm, pt, px (px = pixels of the 600 DPI processing raster).
+      Mistakes are reported all at once, with suggestions, before any scan is processed. The run prints which
+      entries were applied and which were ignored (and why); the manifest records the same.
     """
 }
