@@ -78,6 +78,17 @@ struct RealCorpusTests {
         try #require(run.summary, "no registration summary")
     }
 
+    /// The outlier has its own canvas and its text block lies entirely inside it.
+    static func expectWholeOnOwnCanvas(_ page: PageProcessingRecord) {
+        let plan = page.layoutPlan
+        #expect(plan.canvasSize == plan.proposedCanvasSize)
+        #expect(page.dimension?.pdfPageSizePoints != nil)
+        if let box = plan.sourceContentBox {
+            #expect(plan.destinationOrigin.x >= 0 && plan.destinationOrigin.x + box.width <= plan.canvasSize.width, "\(plan)")
+            #expect(plan.destinationOrigin.y >= 0 && plan.destinationOrigin.y + box.height <= plan.canvasSize.height, "\(plan)")
+        }
+    }
+
     static func headerPageCount(_ run: Run, side: MarginHarmonizer.PageSide) -> Int {
         run.manifest.runningHeaderModel?.sides.first { $0.side == side }?.headerPageCount ?? 0
     }
@@ -101,6 +112,11 @@ struct RealCorpusTests {
         #expect(run.manifest.pages[0].layoutPlan.tier == .standaloneFloating)
         #expect(run.manifest.pages[0].layoutPlan.proposedCanvasSize != nil)
         #expect(run.manifest.canonicalCanvasSizeAtProcessingDPI.width < 4200, "\(run.manifest.canonicalCanvasSizeAtProcessingDPI)")
+        // ... and it has a page of its own that holds its whole text block (Substep 6.2.2).
+        Self.expectWholeOnOwnCanvas(run.manifest.pages[0])
+        #expect(run.manifest.dimensionConsensus?.isolatedCanvasPages == [0])
+        let body = run.output.outputBitmapsAtOutputDPI[1]
+        #expect(run.output.outputBitmapsAtOutputDPI[0].width != body.width || run.output.outputBitmapsAtOutputDPI[0].height != body.height)
     }
 
     @Test("Gury 1866 (pp. 300-307): a header only 1.15 pitches above the body is found and aligned")
@@ -158,6 +174,9 @@ struct RealCorpusTests {
         let table = try #require(run.manifest.pages.first { $0.sourcePageIndex == 3 })
         #expect(table.dimension?.kinds.contains(.orientation) == true, "\(consensus)")
         #expect(table.layoutPlan.isDimensionOutlier)
+        Self.expectWholeOnOwnCanvas(table)
+        let size = try #require(table.dimension?.pdfPageSizePoints)
+        #expect(size.width > size.height, "the table keeps its landscape page: \(size)")
         #expect(run.manifest.pages.filter { $0.layoutPlan.isDimensionOutlier }.count == 1, "\(consensus)")
     }
 
@@ -168,6 +187,10 @@ struct RealCorpusTests {
         #expect(consensus.outlierPages.contains(0), "\(consensus)")
         #expect(run.manifest.pages[0].dimension?.kinds.contains(.undersize) == true)
         #expect(run.manifest.pages[0].layoutPlan.proposedCanvasSize != nil)
+        Self.expectWholeOnOwnCanvas(run.manifest.pages[0])
+        let cover = try #require(run.manifest.pages[0].dimension?.pdfPageSizePoints)
+        let bodySize = try #require(run.manifest.pages.dropFirst().first).layoutPlan.canvasSize
+        #expect(cover.width < Double(bodySize.width) * 72.0 / 600.0, "the thumbnail cover stays a small page: \(cover)")
         #expect(run.manifest.pages.dropFirst().allSatisfy { !$0.layoutPlan.isDimensionOutlier }, "\(consensus)")
     }
 }

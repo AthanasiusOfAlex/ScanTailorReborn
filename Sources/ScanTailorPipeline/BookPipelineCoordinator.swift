@@ -376,6 +376,8 @@ public struct BookPipelineCoordinator: Sendable {
         public var verticalRegistrationConfiguration: VerticalRegistration.Configuration
         /// Consensus-dimension clustering (Substep 6.2.1): which pages share the book's page size.
         public var dimensionConsensusConfiguration: DimensionConsensus.Configuration
+        /// Draw each dimensional outlier on its own PDF page size instead of the book's shared canvas (Substep 6.2.2).
+        public var isolateOutlierCanvases: Bool
 
         public init(
             processingDPI: Int = 600,
@@ -413,9 +415,11 @@ public struct BookPipelineCoordinator: Sendable {
             enableRunningHeaderDetection: Bool = true,
             runningHeaderConfiguration: RunningHeaderDetector.Configuration = RunningHeaderDetector.Configuration(),
             verticalRegistrationConfiguration: VerticalRegistration.Configuration = VerticalRegistration.Configuration(),
-            dimensionConsensusConfiguration: DimensionConsensus.Configuration = DimensionConsensus.Configuration()
+            dimensionConsensusConfiguration: DimensionConsensus.Configuration = DimensionConsensus.Configuration(),
+            isolateOutlierCanvases: Bool = true
         ) {
             self.dimensionConsensusConfiguration = dimensionConsensusConfiguration
+            self.isolateOutlierCanvases = isolateOutlierCanvases
             self.verticalRegistrationConfiguration = verticalRegistrationConfiguration
             self.enableRunningHeaderDetection = enableRunningHeaderDetection
             self.runningHeaderConfiguration = runningHeaderConfiguration
@@ -1396,8 +1400,12 @@ public struct BookPipelineCoordinator: Sendable {
             pages: harmonizerInputs,
             detector: contentDetector,
             dimensionOutliers: dimensionResult.outlierPageIndices,
-            outlierCanvasSizes: outlierCanvasSizes
+            outlierCanvasSizes: outlierCanvasSizes,
+            minimumCanonicalPages: configuration.dimensionConsensusConfiguration.manualOutlierPages != nil ? 1 : 3
         )
+        if let manual = configuration.dimensionConsensusConfiguration.manualOutlierPages {
+            dimensionResult.summary.ignoredManualPages = manual.filter { $0 >= pass1Pages.count }.sorted().map { $0 + 1 }
+        }
 
         // --- PASS 3: Canonical Framing, 600 -> 300 DPI Downsampling, OCR & 1-Bit PDF Assembly ---
         var records: [PageProcessingRecord] = []
@@ -1459,8 +1467,39 @@ public struct BookPipelineCoordinator: Sendable {
             registrationSummary = registered.summary
         }
 
+        // The scale the shared canvas needs to stay below the anti-billboard cap; isolated outliers share it so a
+        // cover keeps its true size relative to the body.
+        var canonicalClampScale = 1.0
+        if !hasExplicitDimensionOverride {
+            let raw = Size2D(
+                width: Double(bookLayout.canvasSize.width) / Double(configuration.processingDPI),
+                height: Double(bookLayout.canvasSize.height) / Double(configuration.processingDPI)
+            )
+            let needsClamp = wasSourceOversized
+                ? fontScaleAnalyzer.isDeclaredPageOversized(raw)
+                : (raw.height > configuration.fontScaleConfiguration.maxCalibratedSpreadHeightInches
+                    || raw.width > configuration.fontScaleConfiguration.maxCalibratedSpreadWidthInches)
+            if needsClamp {
+                let clamped = fontScaleAnalyzer.clampAntiBillboardPageSizeInches(raw)
+                if clamped.wasClamped, raw.width > 0 { canonicalClampScale = clamped.sizeInches.width / raw.width }
+            }
+        }
+        var isolatedOutputPages: [Int] = []
+
         for (idx, p1) in pass1Pages.enumerated() {
-            let plan = overriddenPlans[idx]
+            var plan = overriddenPlans[idx]
+            var isolatedCanvas = false
+            if configuration.isolateOutlierCanvases, let size = plan.proposedCanvasSize {
+                // The outlier gets a canvas of its own: its content stays where it sits on the scan.
+                plan.canvasSize = size
+                if p1.manualOverride?.overrideDestinationOrigin == nil, let box = plan.sourceContentBox {
+                    plan.destinationOrigin = Point2I(
+                        x: min(max(0, box.minX), max(0, size.width - box.width)),
+                        y: min(max(0, box.minY), max(0, size.height - box.height))
+                    )
+                }
+                isolatedCanvas = true
+            }
 
             let framed600 = harmonizer.renderPage(from: p1.cleanedBitmap, plan: plan)
             let finalBitmap: BinaryBitmap
@@ -1484,7 +1523,7 @@ public struct BookPipelineCoordinator: Sendable {
             }
 
             let shouldCollectScaleTelemetry = configuration.enableAutomaticFontScaleCalibration || (effectivePreScaleDecision != nil)
-            if shouldCollectScaleTelemetry && sampledGlyphPageIndices.contains(idx) {
+            if shouldCollectScaleTelemetry && sampledGlyphPageIndices.contains(idx) && !plan.isDimensionOutlier {
                 if let glyphMetrics = fontScaleAnalyzer.analyzePage(
                     in: framed600,
                     declaredDPI: configuration.processingDPI,
@@ -1496,7 +1535,18 @@ public struct BookPipelineCoordinator: Sendable {
 
             var pageWidthPoints = Double(finalBitmap.width) * 72.0 / Double(configuration.outputDPI)
             var pageHeightPoints = Double(finalBitmap.height) * 72.0 / Double(configuration.outputDPI)
-            if !hasExplicitDimensionOverride {
+            if isolatedCanvas {
+                pageWidthPoints *= canonicalClampScale
+                pageHeightPoints *= canonicalClampScale
+                if !hasExplicitDimensionOverride {
+                    let own = Size2D(width: pageWidthPoints / 72.0, height: pageHeightPoints / 72.0)
+                    let capped = fontScaleAnalyzer.clampAntiBillboardPageSizeInches(own)
+                    if capped.wasClamped {
+                        pageWidthPoints = capped.sizeInches.width * 72.0
+                        pageHeightPoints = capped.sizeInches.height * 72.0
+                    }
+                }
+            } else if !hasExplicitDimensionOverride {
                 let rawSizeInches = Size2D(width: pageWidthPoints / 72.0, height: pageHeightPoints / 72.0)
                 let needsCanvasClamp: Bool
                 if wasSourceOversized {
@@ -1528,6 +1578,12 @@ public struct BookPipelineCoordinator: Sendable {
                 throw .pdfWriteFailed(error)
             }
 
+            var dimensionRecord = dimensionResult.records[idx]
+            if isolatedCanvas {
+                dimensionRecord.pdfPageSizePoints = Size2D(width: pageWidthPoints, height: pageHeightPoints)
+                isolatedOutputPages.append(p1.outputPageIndex)
+            }
+
             let skewConf = p1.detection.contentBox == nil ? 1.0 : max(0.5, p1.skewConfidence)
             let overallConfidence = min(p1.splitConfidence, min(skewConf, p1.detection.confidence))
             let flagged = overallConfidence < configuration.lowConfidenceThreshold
@@ -1552,7 +1608,7 @@ public struct BookPipelineCoordinator: Sendable {
                     borderFallback: p1.borderFallback,
                     topAnchor: topAnchors[idx],
                     registration: registrationRecords[idx],
-                    dimension: dimensionResult.records[idx]
+                    dimension: dimensionRecord
                 )
             )
             outputBitmaps.append(finalBitmap)
@@ -1596,6 +1652,9 @@ public struct BookPipelineCoordinator: Sendable {
             fontScaleEstimate = nil
         }
 
+        var finalDimensionSummary = dimensionResult.summary
+        finalDimensionSummary.isolatedCanvasPages = isolatedOutputPages
+
         let manifest = BookProcessingManifest(
             processingDPI: configuration.processingDPI,
             outputDPI: configuration.outputDPI,
@@ -1615,7 +1674,7 @@ public struct BookPipelineCoordinator: Sendable {
             sourcePageGeometry: sourceGeometry,
             runningHeaderModel: runningHeaderModel,
             verticalRegistration: registrationSummary,
-            dimensionConsensus: dimensionResult.summary
+            dimensionConsensus: finalDimensionSummary
         )
 
         return PipelineOutput(

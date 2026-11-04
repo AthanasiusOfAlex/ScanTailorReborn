@@ -39,6 +39,8 @@ public struct PageDimensionRecord: Sendable, Equatable, Codable {
     public var proposedCanvasSize: Size2I?
     /// Index into `DimensionConsensusSummary.outlierGroups` for outliers that share a size (`nil` otherwise).
     public var groupIndex: Int?
+    /// The PDF page size in points when the outlier was drawn on its own canvas (Substep 6.2.2); `nil` otherwise.
+    public var pdfPageSizePoints: Size2D?
 
     public init(
         dimensionClass: DimensionClass = .canonical,
@@ -48,8 +50,10 @@ public struct PageDimensionRecord: Sendable, Equatable, Codable {
         linePitchDeviation: Double? = nil,
         scaleMismatch: Bool = false,
         proposedCanvasSize: Size2I? = nil,
-        groupIndex: Int? = nil
+        groupIndex: Int? = nil,
+        pdfPageSizePoints: Size2D? = nil
     ) {
+        self.pdfPageSizePoints = pdfPageSizePoints
         self.dimensionClass = dimensionClass
         self.kinds = kinds
         self.widthDeviation = widthDeviation
@@ -78,6 +82,10 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
     public var outlierGroups: [[Int]]
     /// Source page indices that were not split because they are landscape in a portrait book.
     public var splitVetoedSourcePages: [Int]
+    /// Output page indices drawn on their own canvas (Substep 6.2.2).
+    public var isolatedCanvasPages: [Int]
+    /// Entries of a manual `--outlier-pages` list (1-based) that name no page of the book.
+    public var ignoredManualPages: [Int]
     /// The relative tolerance used.
     public var toleranceFraction: Double
 
@@ -91,8 +99,12 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
         outlierPages: [Int] = [],
         outlierGroups: [[Int]] = [],
         splitVetoedSourcePages: [Int] = [],
-        toleranceFraction: Double = 0.08
+        toleranceFraction: Double = 0.08,
+        isolatedCanvasPages: [Int] = [],
+        ignoredManualPages: [Int] = []
     ) {
+        self.isolatedCanvasPages = isolatedCanvasPages
+        self.ignoredManualPages = ignoredManualPages
         self.applied = applied
         self.ambiguous = ambiguous
         self.note = note
@@ -117,6 +129,8 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
         outlierGroups = try c.decodeIfPresent([[Int]].self, forKey: .outlierGroups) ?? []
         splitVetoedSourcePages = try c.decodeIfPresent([Int].self, forKey: .splitVetoedSourcePages) ?? []
         toleranceFraction = try c.decodeIfPresent(Double.self, forKey: .toleranceFraction) ?? 0.08
+        isolatedCanvasPages = try c.decodeIfPresent([Int].self, forKey: .isolatedCanvasPages) ?? []
+        ignoredManualPages = try c.decodeIfPresent([Int].self, forKey: .ignoredManualPages) ?? []
     }
 }
 
@@ -146,6 +160,10 @@ public struct DimensionConsensus: Sendable {
         public var contentOverflowFraction: Double
         /// Fraction of portrait scans needed before a landscape scan is kept whole instead of split (default `0.75`).
         public var portraitBookFraction: Double
+        /// An exact list of outlier pages (0-based output page indices; `--outlier-pages`). When non-`nil`, these
+        /// pages and only these are outliers: automatic detection and per-page overrides are skipped, and the list
+        /// applies even when `enabled` is `false` or the book is short. An empty set means "no outliers".
+        public var manualOutlierPages: Set<Int>?
 
         public init(
             enabled: Bool = true,
@@ -155,8 +173,10 @@ public struct DimensionConsensus: Sendable {
             maxOutlierFraction: Double = 0.25,
             scaleMismatchTolerance: Double = 0.20,
             contentOverflowFraction: Double = 0.15,
-            portraitBookFraction: Double = 0.75
+            portraitBookFraction: Double = 0.75,
+            manualOutlierPages: Set<Int>? = nil
         ) {
+            self.manualOutlierPages = manualOutlierPages
             self.enabled = enabled
             self.toleranceFraction = min(max(0.02, toleranceFraction), 0.50)
             self.iqrMultiplier = min(max(0.5, iqrMultiplier), 5.0)
@@ -229,8 +249,13 @@ public struct DimensionConsensus: Sendable {
                 )
             )
         }
-        guard configuration.enabled else { return unapplied("disabled") }
-        guard pages.count >= configuration.minimumPageCount else { return unapplied("tooFewPages") }
+        let manual = configuration.manualOutlierPages
+        var skipNote: String? = nil
+        if manual == nil {
+            if !configuration.enabled { skipNote = "disabled" }
+            else if pages.count < configuration.minimumPageCount { skipNote = "tooFewPages" }
+        }
+        let skipAutomatic = manual != nil || skipNote != nil
 
         let widths = pages.map { Double($0.pageSize.width) }
         let heights = pages.map { Double($0.pageSize.height) }
@@ -243,6 +268,7 @@ public struct DimensionConsensus: Sendable {
 
         // Size-based kinds, per page.
         var kinds: [[DimensionOutlierKind]] = pages.map { page in
+            if skipAutomatic { return (manual?.contains(page.pageIndex) == true) ? [.manual] : [] }
             var found: [DimensionOutlierKind] = []
             let dw = (Double(page.pageSize.width) - medW) / medW
             let dh = (Double(page.pageSize.height) - medH) / medH
@@ -261,7 +287,7 @@ public struct DimensionConsensus: Sendable {
         // Either many pages differ, or the sizes are so spread out (a large second size group) that the
         // interquartile range itself is wider than `maxOutlierFraction` of the median.
         let sizesSpread = thresholdW > configuration.maxOutlierFraction || thresholdH > configuration.maxOutlierFraction
-        if sizesSpread || Double(sizeOutliers) > configuration.maxOutlierFraction * Double(pages.count) {
+        if !skipAutomatic && (sizesSpread || Double(sizeOutliers) > configuration.maxOutlierFraction * Double(pages.count)) {
             ambiguous = true
             kinds = kinds.map { _ in [] }
         }
@@ -272,7 +298,7 @@ public struct DimensionConsensus: Sendable {
                   Double(box.width) >= 0.35 * medW else { return nil }
             return box
         }
-        if referenceBoxes.count >= 3 {
+        if !skipAutomatic && referenceBoxes.count >= 3 {
             let refW = Self.percentile(referenceBoxes.map { Double($0.width) }, 0.85)
             let refH = Self.percentile(referenceBoxes.map { Double($0.height) }, 0.85)
             let limit = 1.0 + configuration.contentOverflowFraction
@@ -291,7 +317,7 @@ public struct DimensionConsensus: Sendable {
         records.reserveCapacity(pages.count)
         for (i, page) in pages.enumerated() {
             var pageKinds = kinds[i]
-            if let forced = page.forcedClass {
+            if manual == nil, let forced = page.forcedClass {
                 pageKinds = forced == .outlier ? (pageKinds.isEmpty ? [.manual] : pageKinds) : []
             }
             let isOutlier = !pageKinds.isEmpty
@@ -338,9 +364,9 @@ public struct DimensionConsensus: Sendable {
 
         let outlierPages = pages.indices.filter { records[$0].dimensionClass == .outlier }.map { pages[$0].pageIndex }
         let summary = DimensionConsensusSummary(
-            applied: true,
+            applied: skipNote == nil,
             ambiguous: ambiguous,
-            note: ambiguous ? "manySizeOutliers" : nil,
+            note: manual != nil ? "manualList" : (skipNote ?? (ambiguous ? "manySizeOutliers" : nil)),
             medianPageSize: Size2I(width: Int(medW.rounded()), height: Int(medH.rounded())),
             canonicalPageCount: pages.count - outlierPages.count,
             outlierPageCount: outlierPages.count,

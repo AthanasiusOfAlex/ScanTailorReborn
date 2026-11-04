@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-04  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 6, Substeps 6.1.1, 6.1.2 and 6.2.1 done. Next: **Substep 6.2.2 — Independent Outlier Trim Box** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
+**Current Active Milestone**: Phase 6, Substeps 6.1.1, 6.1.2, 6.2.1 and 6.2.2 done. Next: **Substep 6.3.1 — Manifest-Driven Per-Page Adjustments** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -232,18 +232,28 @@ Groups the processed pages into **canonical** pages and **dimensional outliers**
 6. **Tests**: [`DimensionConsensusTests.swift`](../Tests/ScanTailorCoreTests/DimensionConsensusTests.swift) (14; 13 in milliseconds, one small pipeline run of ~2.5 s), plus `RealCorpusTests`: Flannery cover is the one oversize outlier and the canvas stays under 4,200 px; SLE.2 table kept whole and marked `orientation`; Pilsner thumbnail cover is `undersize`.
 7. **Known limitations / hand-offs**: (a) outliers are only recorded, not rendered on their own canvas (**6.2.2**; `ApplePDFDocumentWriter` already takes a page box per page, but the coordinator renders every page on the shared canvas); (b) the canonical frame of a book whose body pages themselves vary is unchanged; (c) ELPost's second size group (pp. 336–357) is not an outlier (ambiguity guard) and is not recorded as a cluster; (d) scale mismatch is not corrected; (e) the veto looks at scan shape only, so a portrait foldout in a landscape-scan book is not caught; (f) the veto runs before rectification, on the declared scan size.
 
+### 3.13 Recently Completed: Substep 6.2.2 (Independent Outlier Trim Box)
+Each dimensional outlier is drawn on its **own canvas and PDF page size**; the book's shared canvas and canonical frame are untouched.
+
+1. **Manual list first**: `--outlier-pages 1,45,89-91,120 | none` (1-based *output* pages) → `DimensionConsensus.Configuration.manualOutlierPages` (0-based). It replaces detection entirely: works with detection off or fewer than 5 pages, beats per-page `dimensionClass`, `none` = no outliers, summary note `manualList`, numbers past the end are listed in `ignoredManualPages`. With a manual list the harmonizer needs only 1 canonical page (`minimumCanonicalPages`). Per-page `dimensionClass: outlier` now also works when automatic detection is off or the book is short (was ignored in 6.2.1).
+2. **Rendering** (pass 3 of [`BookPipelineCoordinator.swift`](../Sources/ScanTailorPipeline/BookPipelineCoordinator.swift)): with `isolateOutlierCanvases` (default; `--outlier-canvas isolated|shared`, `shared` = 6.2.1 output) the plan's `canvasSize` becomes `proposedCanvasSize` (scan size, grown to hold the text block) and the content keeps its natural position, unless a manual `overrideDestinationOrigin` is set. `PageLayoutPlan.canvasSize` is now `var`. The PDF writer needed no change (it already takes a box per page).
+3. **Anti-billboard cap**: the canonical canvas's clamp factor is computed once; outliers get the same factor (a cover keeps its size relative to the body) and are then capped on their own only if still billboard-sized. Outlier caps never touch `canonicalCanvasSize`/`clampedCanonicalInches`. Skipped when an explicit `--page-size`/`--content-box-size`/`--input-dpi` is given. Outliers are left out of the post-calibration glyph sample.
+4. **Manifest** (all optional): `PageDimensionRecord.pdfPageSizePoints` (non-nil = own canvas), `DimensionConsensusSummary.isolatedCanvasPages`, `.ignoredManualPages`. CLI line shows `own 8.5×11.0 in`.
+5. **Tests**: [`OutlierCanvasTests.swift`](../Tests/ScanTailorCoreTests/OutlierCanvasTests.swift) (7, ~2 s; uses a recording PDF writer), plus corpus assertions for Flannery (cover on its own canvas, whole), SLE.2 (landscape table page) and Pilsner (small cover page).
+6. **Known limitations**: (a) the "outliers share the body's clamp factor" rule has no pipeline-level test (it needs billboard-sized pages); (b) thumbnail covers stay small (no upscaling of 1-bit images); (c) two-page viewers show odd-sized spreads around outliers; (d) foldouts are not rotated; (e) the manual list is by output page, so adding/removing pages or changing the split changes what the numbers mean.
+
 ---
 
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 6, Substep 6.2.2**, copy and provide the following prompt:
+To begin **Phase 6, Substep 6.3.1**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 6.2.2 — Independent Outlier Trim Box.
+We are resuming ScanTailorReborn on Substep 6.3.1 — Manifest-Driven Per-Page Adjustments (`--apply-manifest`).
 
 1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.12) and `docs/WHITE_PAPER.md` Phase 6, Step 6.2. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
-3. Propose a design for giving each dimensional outlier (`PageLayoutPlan.proposedCanvasSize`, `PageProcessingRecord.dimension`) its own isolated PDF page size and canvas in `ApplePDFDocumentWriter.swift` and the coordinator's pass 3, without distorting the canonical trim size; cover rendering, the 600 → 300 DPI downsample, the anti-billboard clamp, manifest telemetry, overrides, a CLI switch and tests. Pause for approval before implementing.
+2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.11–3.13) and `docs/WHITE_PAPER.md` Phase 6, Step 6.3. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
+3. Propose a design for `--apply-manifest <path>`: which `PageManualOverride` / book-level fields an agent can edit (contentBox nudge, pageSize, margins, skew, splitCenter, dewarpDisable, tier, outlier pages), how edits are validated, and how it relates to the existing `existingManifest` re-run path. Pause for approval before implementing.
 4. After approval, implement with tests, confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Step 6.3.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 6.3.2.
 ```

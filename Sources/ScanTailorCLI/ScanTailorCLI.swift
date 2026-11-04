@@ -99,6 +99,9 @@ public struct ScanTailorCLI {
         public var enableRunningHeaderDetection: Bool = true
         public var enableDimensionConsensus: Bool = true
         public var outlierTolerance: Double = 0.08
+        /// Exact outlier pages, 1-based output pages (`--outlier-pages`); `nil` is automatic, empty is "none".
+        public var outlierPages: Set<Int>? = nil
+        public var isolateOutlierCanvases: Bool = true
 
         public init(inputPDFPath: String, outputPDFPath: String) {
             self.inputPDFPath = inputPDFPath
@@ -158,6 +161,8 @@ public struct ScanTailorCLI {
         var enableHeaderDetection = true
         var dimensionConsensus = true
         var outlierTolerance = 0.08
+        var outlierPages: Set<Int>? = nil
+        var isolateOutlierCanvases = true
 
         var i = 0
         while i < args.count {
@@ -341,6 +346,21 @@ public struct ScanTailorCLI {
                 }
                 outlierTolerance = value
                 i += 2
+            case "--outlier-pages":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let list = Self.parseOutlierPages(args[i + 1]) else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                outlierPages = list
+                i += 2
+            case "--outlier-canvas":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                switch args[i + 1].lowercased() {
+                case "isolated": isolateOutlierCanvases = true
+                case "shared": isolateOutlierCanvases = false
+                default: throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                i += 2
             case "--no-running-headers":
                 enableHeaderDetection = false
                 i += 1
@@ -409,6 +429,8 @@ public struct ScanTailorCLI {
         opts.enableRunningHeaderDetection = enableHeaderDetection
         opts.enableDimensionConsensus = dimensionConsensus
         opts.outlierTolerance = outlierTolerance
+        opts.outlierPages = outlierPages
+        opts.isolateOutlierCanvases = isolateOutlierCanvases
         return opts
     }
 
@@ -509,8 +531,10 @@ public struct ScanTailorCLI {
             verticalRegistrationConfiguration: VerticalRegistration.Configuration(mode: options.verticalRegistrationMode),
             dimensionConsensusConfiguration: DimensionConsensus.Configuration(
                 enabled: options.enableDimensionConsensus,
-                toleranceFraction: options.outlierTolerance
-            )
+                toleranceFraction: options.outlierTolerance,
+                manualOutlierPages: options.outlierPages.map { Set($0.map { $0 - 1 }) }
+            ),
+            isolateOutlierCanvases: options.isolateOutlierCanvases
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -625,6 +649,24 @@ public struct ScanTailorCLI {
         print(formatManifestSummary(manifest))
     }
 
+    /// Parses `--outlier-pages`: `none`, or comma-separated 1-based pages and ranges such as `1,45,89-91`.
+    static func parseOutlierPages(_ text: String) -> Set<Int>? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+        if trimmed == "none" { return [] }
+        var result: Set<Int> = []
+        for part in trimmed.split(separator: ",", omittingEmptySubsequences: false) {
+            let bounds = part.split(separator: "-", omittingEmptySubsequences: false).map { Int($0.trimmingCharacters(in: .whitespaces)) }
+            if bounds.count == 1, let n = bounds[0], n >= 1 {
+                result.insert(n)
+            } else if bounds.count == 2, let lo = bounds[0], let hi = bounds[1], lo >= 1, lo <= hi, hi - lo < 100_000 {
+                result.formUnion(lo...hi)
+            } else {
+                return nil
+            }
+        }
+        return result.isEmpty ? nil : result
+    }
+
     private static func percent(_ fraction: Double) -> String {
         let value = Int((fraction * 100).rounded())
         return value >= 0 ? "+\(value)%" : "\(value)%"
@@ -710,9 +752,14 @@ public struct ScanTailorCLI {
                     guard let d = page.dimension, d.dimensionClass == .outlier else { return nil }
                     let kinds = d.kinds.map(\.rawValue).joined(separator: "/")
                     let scale = d.scaleMismatch ? " scale≠" : ""
-                    return "p\(page.outputPageIndex + 1) \(kinds) \(Self.percent(d.widthDeviation)) W \(Self.percent(d.heightDeviation)) H\(scale)"
+                    let own = d.pdfPageSizePoints.map { String(format: " own %.1f×%.1f in", $0.width / 72, $0.height / 72) } ?? ""
+                    return "p\(page.outputPageIndex + 1) \(kinds) \(Self.percent(d.widthDeviation)) W \(Self.percent(d.heightDeviation)) H\(scale)\(own)"
                 }
                 if !described.isEmpty { text += " (" + described.prefix(6).joined(separator: "; ") + (described.count > 6 ? "; …" : "") + ")" }
+                if consensus.note == "manualList" { text += " | manual list" }
+                if !consensus.ignoredManualPages.isEmpty {
+                    text += " | ignored (not in book): " + consensus.ignoredManualPages.map(String.init).joined(separator: ",")
+                }
                 if consensus.ambiguous { text += " | ambiguous: sizes not trusted" }
                 if !consensus.splitVetoedSourcePages.isEmpty {
                     text += " | not split: scans " + consensus.splitVetoedSourcePages.map { String($0 + 1) }.joined(separator: ",")
@@ -799,6 +846,8 @@ public struct ScanTailorCLI {
                                    header or first body baseline) or box-top (legacy; align content-box tops)
       --dimension-consensus <mode> Group pages by size: auto (default; covers, plates and foldouts of a different size
                                    are kept out of the book's page size) or off
+      --outlier-pages <list|none>  Exact outlier pages (1-based output pages, e.g. 1,45,89-91,120); overrides detection
+      --outlier-canvas <mode>      isolated (default: each outlier gets its own page size) or shared
       --outlier-tolerance <frac>   Relative size difference that makes a page an outlier (default 0.08)
       --no-running-headers         Disable running-header detection (and with it, vertical registration)
       --no-ocr                     Disable OCR searchable text layer

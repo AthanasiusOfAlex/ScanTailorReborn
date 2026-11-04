@@ -158,7 +158,7 @@ public struct MarginHarmonizer: Sendable {
         /// Target destination origin `(x, y)` on the canonical output canvas where `sourceContentBox.origin` is placed.
         public var destinationOrigin: Point2I
         /// Target canonical output canvas dimensions in pixels (at `dpi`, typically 600 DPI).
-        public let canvasSize: Size2I
+        public var canvasSize: Size2I
         /// For Tier 2 pages, which vertical edge was pinned to the canonical frame (`nil` for
         /// Tiers 1 and 3 and for plans written before Substep 6.1.2).
         public var verticalAnchorEdge: VerticalAnchorEdge?
@@ -232,12 +232,13 @@ public struct MarginHarmonizer: Sendable {
     /// - Parameter dimensionOutliers: Page indices classified as dimensional outliers (Substep 6.2.1). They are
     ///   left out of the median page size and the canonical frame, and are forced to Tier 3 with
     ///   `proposedCanvasSize` set to `outlierCanvasSizes[pageIndex]` (or their own size). When fewer than three
-    ///   canonical pages would remain, the set is ignored.
+    ///   canonical pages (`minimumCanonicalPages`, 1 for a manual list) would remain, the set is ignored.
     public func harmonizeBook(
         pages: [PageInput],
         detector: ContentBoxDetector = ContentBoxDetector(),
         dimensionOutliers: Set<Int> = [],
-        outlierCanvasSizes: [Int: Size2I] = [:]
+        outlierCanvasSizes: [Int: Size2I] = [:],
+        minimumCanonicalPages: Int = 3
     ) -> BookLayoutModel {
         guard !pages.isEmpty else {
             if configuration.targetPageSize == nil && configuration.targetContentBoxSize == nil {
@@ -287,7 +288,7 @@ public struct MarginHarmonizer: Sendable {
         // Step 1: Collect raw non-empty content widths and heights to estimate the 75th-percentile
         // canonical width prior for Pass 2 smudge outlier rejection (or use explicit `--content-box-size` width).
         let canonicalCandidates = pages.filter { !dimensionOutliers.contains($0.pageIndex) }
-        let outlierSet: Set<Int> = canonicalCandidates.count >= 3 ? dimensionOutliers : []
+        let outlierSet: Set<Int> = canonicalCandidates.count >= minimumCanonicalPages ? dimensionOutliers : []
         let statPages = outlierSet.isEmpty ? pages : canonicalCandidates
         let rawBoxes = statPages.compactMap(\.detection.contentBox).filter { !$0.isEmpty }
         let medianPageWidth = Self.percentileInt(statPages.map(\.pageSize.width), p: 0.50) ?? pages[0].pageSize.width
