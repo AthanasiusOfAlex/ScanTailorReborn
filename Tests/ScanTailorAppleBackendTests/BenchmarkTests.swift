@@ -40,12 +40,8 @@ struct BenchmarkTests {
     static let vermeersch = Book(name: "vermeersch.1934", relativePath: "vermeersch.1934/00-pdf-orig/vermeersch.1934.pdf", knownFailing: [
         "canvas-hugs-text": "7.1.1c", "header-pages-top-aligned": "7.1.1c", "header-registration": "7.1.1c",
     ])
-    // Camera photo, cropped to the paper and split at the fold (7.1.1b). Perspective makes page 280's text block 11%
-    // narrower than 281's, so it falls out of the full-width tier and floats off-center until camera pages are
-    // scaled to the book's text block (7.1.1b, part i).
-    static let simpson = Book(name: "simpson.1968 (pp. 280-281)", relativePath: "simpson.1968/simpson.1968.280-281.pdf", knownFailing: [
-        "canvas-hugs-text": "7.1.1b-i",
-    ])
+    // Camera photo, cropped to the paper, split at the fold, and each page scaled to the book's text block (7.1.1b).
+    static let simpson = Book(name: "simpson.1968 (pp. 280-281)", relativePath: "simpson.1968/simpson.1968.280-281.pdf", knownFailing: [:])
 
     /// Scored results for one book; written as JSON.
     struct Scorecard: Codable {

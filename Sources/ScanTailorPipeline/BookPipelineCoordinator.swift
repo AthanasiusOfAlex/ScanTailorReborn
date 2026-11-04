@@ -154,6 +154,10 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
     public var registration: PageVerticalRegistration?
     /// Consensus-dimension outcome (`nil` for manifests written before Substep 6.2.1).
     public var dimension: PageDimensionRecord?
+    /// Horizontal (`width`) and vertical (`height`) factors this camera-photographed page was resampled by to
+    /// match the book's text block (Substep 7.1.1b-i). Every box in ``layoutPlan`` is in the resampled page.
+    /// `nil` for unscaled pages and manifests written before 7.1.1b.
+    public var textBlockScale: Size2D?
 
     public init(
         outputPageIndex: Int,
@@ -174,9 +178,11 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
         borderFallback: MacroBorderResult? = nil,
         topAnchor: PageTopAnchor? = nil,
         registration: PageVerticalRegistration? = nil,
-        dimension: PageDimensionRecord? = nil
+        dimension: PageDimensionRecord? = nil,
+        textBlockScale: Size2D? = nil
     ) {
         self.dimension = dimension
+        self.textBlockScale = textBlockScale
         self.borderFallback = borderFallback
         self.topAnchor = topAnchor
         self.registration = registration
@@ -503,6 +509,9 @@ public struct BookPipelineCoordinator: Sendable {
         public var jobs: Int
         /// Reuse of earlier results (`--cache-dir`, Substep 6.3.2); `nil` computes everything.
         public var cache: PipelineCacheOptions?
+        /// Resampling of camera-photographed pages to the book's text-block size (Substep 7.1.1b-i); `nil` keeps
+        /// every page at its photographed scale. Flatbed scans are never resampled.
+        public var cameraTextBlockScaling: TextBlockScaleNormalizer.Configuration?
 
         public init(
             processingDPI: Int = 600,
@@ -546,10 +555,12 @@ public struct BookPipelineCoordinator: Sendable {
             manualOutlierReferences: [PageReference] = [],
             stopAfter: PipelineStop? = nil,
             jobs: Int = 1,
-            cache: PipelineCacheOptions? = nil
+            cache: PipelineCacheOptions? = nil,
+            cameraTextBlockScaling: TextBlockScaleNormalizer.Configuration? = TextBlockScaleNormalizer.Configuration()
         ) {
             self.jobs = max(1, jobs)
             self.cache = cache
+            self.cameraTextBlockScaling = cameraTextBlockScaling
             self.adjustments = adjustments
             self.manualOutlierReferences = manualOutlierReferences
             self.stopAfter = stopAfter
@@ -978,6 +989,7 @@ public struct BookPipelineCoordinator: Sendable {
         let detection: ContentBoxDetector.DetectionResult
         let manualOverride: PageManualOverride?
         let borderFallback: MacroBorderResult?
+        let textBlockScale: Size2D?
     }
 
     /// Runs the complete 3-pass pipeline directly on an array of source `GrayscaleBuffer` scans
@@ -1493,16 +1505,52 @@ public struct BookPipelineCoordinator: Sendable {
             }
         }
 
+        // 1c. Camera photos: every page's text block at the book's size (Substep 7.1.1b-i). Perspective shows the
+        // pages of one photo at different scales, so each camera page is resampled before anything measures it.
+        // Scales come from the automatic detection; content-box edits below refer to the resampled page, the one
+        // `inspect` shows.
+        let textBlockScales: [Size2D?] = configuration.cameraTextBlockScaling.map { scaling in
+            TextBlockScaleNormalizer.scales(
+                for: numbered.map { page in
+                    TextBlockScaleNormalizer.PageInput(
+                        group: page.sourceIndex,
+                        contentBox: scanResults[page.sourceIndex].slices[page.sliceIndex].detection.contentBox,
+                        isEligible: scanResults[page.sourceIndex].header.geometry.looksLikeCameraPhoto
+                    )
+                },
+                configuration: scaling
+            )
+        } ?? Array(repeating: nil, count: numbered.count)
+        let scaledPages = textBlockScales.indices.filter { textBlockScales[$0] != nil }
+        var resampledBitmaps = [BinaryBitmap?](repeating: nil, count: numbered.count)
+        var scaleClock = StageClock()
+        if !scaledPages.isEmpty {
+            let start = ContinuousClock.now
+            let sources = scaledPages.map { scanResults[numbered[$0].sourceIndex].slices[numbered[$0].sliceIndex].cleaned }
+            let factors = scaledPages.map { textBlockScales[$0]! }
+            let resampled = await BoundedParallel.map(count: scaledPages.count, jobs: jobCount) { (i: Int) async -> BinaryBitmap in
+                TextBlockScaleNormalizer.resample(sources[i], by: factors[i])
+            }
+            for (i, k) in scaledPages.enumerated() { resampledBitmaps[k] = resampled[i] }
+            scaleClock.add("pass1.textBlockScale", ContinuousClock.now - start)
+        }
+
         // 1c (continued). Content-box edits, applied over the automatic detection.
         var pass1Pages: [Pass1Page] = []
         pass1Pages.reserveCapacity(numbered.count)
-        for page in numbered {
+        for (k, page) in numbered.enumerated() {
             let result = scanResults[page.sourceIndex]
             let slice = result.slices[page.sliceIndex]
-            let finalCleaned = slice.cleaned
+            let textBlockScale = textBlockScales[k]
+            let finalCleaned = resampledBitmaps[k] ?? slice.cleaned
             let pageSize = Size2I(width: finalCleaned.width, height: finalCleaned.height)
             var manualOverride = page.manualOverride
-            var detection = slice.detection
+            var detection = textBlockScale.map { TextBlockScaleNormalizer.scaled(slice.detection, by: $0, within: pageSize) } ?? slice.detection
+            let tracedLines = textBlockScale.map { scale in
+                slice.tracedLines.map { line in
+                    PolyLine2D(points: line.points.map { Point2D(x: $0.x * scale.width, y: $0.y * scale.height) })
+                }
+            } ?? slice.tracedLines
             if let nudge = manualOverride?.contentBoxNudge {
                 // Nudge the absolute box if one was given, otherwise the detected one; keep the result as an
                 // absolute box so the stored override stays idempotent.
@@ -1541,11 +1589,12 @@ public struct BookPipelineCoordinator: Sendable {
                     dewarpApplied: slice.dewarpApplied,
                     dewarpVerticalSagPixels: slice.dewarpVerticalSagPixels,
                     dewarpResidualRMSPixels: slice.dewarpResidualRMSPixels,
-                    tracedLines: slice.tracedLines,
+                    tracedLines: tracedLines,
                     cleanedBitmap: finalCleaned,
                     detection: detection,
                     manualOverride: manualOverride,
-                    borderFallback: slice.borderFallback
+                    borderFallback: slice.borderFallback,
+                    textBlockScale: textBlockScale
                 )
             )
         }
@@ -1554,9 +1603,11 @@ public struct BookPipelineCoordinator: Sendable {
         let scansReused = scanResults.filter(\.reused).count
         var workClock = StageClock()
         for result in scanResults { workClock.merge(result.clock) }
+        workClock.merge(scaleClock)
         scanResults = []
         let pass1Elapsed = ContinuousClock.now - pass1Start
         let pass2Start = ContinuousClock.now
+
 
         // --- Running headers & top baselines (telemetry only; changes no pixels) ---
         var topAnchors: [PageTopAnchor?] = Array(repeating: nil, count: pass1Pages.count)
@@ -1908,7 +1959,8 @@ public struct BookPipelineCoordinator: Sendable {
                     borderFallback: p1.borderFallback,
                     topAnchor: topAnchors[idx],
                     registration: registrationRecords[idx],
-                    dimension: dimensionRecord
+                    dimension: dimensionRecord,
+                    textBlockScale: p1.textBlockScale
                 )
             )
             if let renderedBitmap { outputBitmaps.append(renderedBitmap) }

@@ -248,6 +248,18 @@ struct RunningHeaderDetectionTests {
         #expect(small.anchors[1].kind == .bodyBaseline)
         #expect(small.model.sides[0].flags == ["book:tooFewPages"])
 
+        // Slanted columns on a camera photo run the lines together into page-tall "lines": no anchor (7.1.1b-i).
+        let merged = RunningHeaderDetector.PageLineProfile(
+            pageIndex: 0, side: .single, pageSize: Size2I(width: 1000, height: 1400),
+            lines: [
+                .init(bounds: Rect2I(x: 100, y: 100, width: 800, height: 500), baselineY: 590, coreHeight: 450, inkPixels: 90_000),
+                .init(bounds: Rect2I(x: 100, y: 620, width: 800, height: 600), baselineY: 1210, coreHeight: 550, inkPixels: 99_000),
+            ]
+        )
+        let mergedAnchor = RunningHeaderDetector().analyzeBook([merged]).anchors[0]
+        #expect(mergedAnchor.kind == .none)
+        #expect(mergedAnchor.flags.contains("body:linesUnresolved"))
+
         // Blank page.
         let blank = RunningHeaderDetector().profilePage(BinaryBitmap(width: 100, height: 100), region: nil, pageIndex: 0, side: .recto)
         let blankAnalysis = RunningHeaderDetector().analyzeBook([blank])

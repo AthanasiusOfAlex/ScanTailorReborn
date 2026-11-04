@@ -577,7 +577,11 @@ public struct RunningHeaderDetector: Sendable {
                 if footer != nil { footerCount += 1 }
                 let bodyIndex = isHeader ? 1 : 0
                 let lastBodyIndex = footer == nil ? lines.count - 1 : lines.count - 2
-                let body = bodyIndex <= lastBodyIndex ? lines[bodyIndex] : nil
+                // A "line" taller than a fifth of the page is several lines run together (slanted columns on a
+                // camera photo leave no gaps in the row profile); its baseline means nothing, so it anchors nothing.
+                let candidateBody = bodyIndex <= lastBodyIndex ? lines[bodyIndex] : nil
+                let body = candidateBody.flatMap { $0.bounds.height * 5 <= profile.pageSize.height ? $0 : nil }
+                if candidateBody != nil && body == nil { flags.append("body:linesUnresolved") }
 
                 if isHeader {
                     headerCount += 1
