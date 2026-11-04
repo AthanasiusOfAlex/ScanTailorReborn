@@ -47,6 +47,9 @@ public struct PageTopAnchor: Sendable, Equatable, Codable {
     public var confidence: Double
     /// Diagnostic flags (for example `header:outOfCluster`, `titleLike`, `sinkage`, `book:tooFewPages`).
     public var flags: [String]
+    /// This page's own median body line pitch in pixels (`nil` with fewer than four lines). Lets vertical
+    /// registration spot pages whose text differs from the rest of the book.
+    public var bodyLinePitch: Double?
 
     public init(
         kind: Kind,
@@ -58,8 +61,10 @@ public struct PageTopAnchor: Sendable, Equatable, Codable {
         firstBodyLineTopY: Int? = nil,
         firstBodyBaselineY: Int? = nil,
         confidence: Double,
-        flags: [String] = []
+        flags: [String] = [],
+        bodyLinePitch: Double? = nil
     ) {
+        self.bodyLinePitch = bodyLinePitch
         self.kind = kind
         self.anchorY = anchorY
         self.headerBox = headerBox
@@ -146,6 +151,9 @@ public struct RunningHeaderDetector: Sendable {
     public struct Configuration: Sendable, Equatable, Codable {
         /// Minimum black pixels for a row to count as inked.
         public var minRowInkPixels: Int
+        /// Minimum black pixels for a row to count as inked, as a fraction of the profiled width
+        /// (the larger of this and `minRowInkPixels` applies). Ignores faint dotted noise between lines.
+        public var minRowInkFraction: Double
         /// Minimum header-to-body baseline distance, in body line pitches, for a top line to be a header candidate.
         public var minHeaderSeparationPitches: Double
         /// Maximum header core height relative to body core height; taller top lines are titles.
@@ -168,9 +176,23 @@ public struct RunningHeaderDetector: Sendable {
         public var minFooterSeparationPitches: Double
         /// A page whose text starts this fraction of the page height below its side's median start is flagged `sinkage`.
         public var sinkageFraction: Double
+        /// Minimum header separation, in body line pitches, for a top line that comes with supporting
+        /// evidence (a gap clearly larger than the inter-line gaps, or an outer folio segment).
+        public var minSupportedSeparationPitches: Double
+        /// Minimum ratio of the gap under the top line to the median gap between body lines for that evidence.
+        public var minHeaderGapRatio: Double
+        /// A pixel column inked over at least this fraction of the profiled region's height is a vertical
+        /// streak (page-edge stack, gutter shadow, vertical rule) and is ignored; `0` disables suppression.
+        public var streakColumnFraction: Double
+        /// Columns separated from the main text block by an empty gap of at least this fraction of the
+        /// profiled width are ignored when their ink is small (page-edge textures, scanner noise); `0` disables.
+        public var minColumnIsolationGapFraction: Double
+        /// Lines smaller than this fraction of the typical core height (in both height and width) are specks, not text.
+        public var speckFraction: Double
 
         public init(
             minRowInkPixels: Int = 1,
+            minRowInkFraction: Double = 0.006,
             minHeaderSeparationPitches: Double = 1.5,
             maxHeaderHeightRatio: Double = 1.75,
             minHeaderHeightRatio: Double = 0.35,
@@ -181,9 +203,20 @@ public struct RunningHeaderDetector: Sendable {
             maxFolioWidthCoreHeights: Double = 4.5,
             minFolioGapCoreHeights: Double = 2.5,
             minFooterSeparationPitches: Double = 1.5,
-            sinkageFraction: Double = 0.15
+            sinkageFraction: Double = 0.15,
+            minSupportedSeparationPitches: Double = 1.05,
+            minHeaderGapRatio: Double = 2.0,
+            streakColumnFraction: Double = 0.7,
+            minColumnIsolationGapFraction: Double = 0.005,
+            speckFraction: Double = 0.5
         ) {
+            self.minColumnIsolationGapFraction = minColumnIsolationGapFraction <= 0 ? 0 : min(max(0.003, minColumnIsolationGapFraction), 0.5)
+            self.speckFraction = min(max(0.0, speckFraction), 1.0)
+            self.minSupportedSeparationPitches = min(max(1.05, minSupportedSeparationPitches), 6.0)
+            self.minHeaderGapRatio = min(max(1.0, minHeaderGapRatio), 20.0)
+            self.streakColumnFraction = streakColumnFraction <= 0 ? 0 : min(max(0.2, streakColumnFraction), 1.0)
             self.minRowInkPixels = max(1, minRowInkPixels)
+            self.minRowInkFraction = min(max(0.0, minRowInkFraction), 0.2)
             self.minHeaderSeparationPitches = min(max(1.05, minHeaderSeparationPitches), 6.0)
             self.maxHeaderHeightRatio = min(max(1.0, maxHeaderHeightRatio), 4.0)
             self.minHeaderHeightRatio = min(max(0.05, minHeaderHeightRatio), 1.0)
@@ -221,7 +254,7 @@ public struct RunningHeaderDetector: Sendable {
     }
 
     /// Text lines and body metrics measured on one page.
-    public struct PageLineProfile: Sendable, Equatable {
+    public struct PageLineProfile: Sendable, Equatable, Codable {
         /// Output page index.
         public var pageIndex: Int
         /// Logical page side.
@@ -238,6 +271,10 @@ public struct RunningHeaderDetector: Sendable {
         public var bodyLinePitch: Double?
         /// Median core height of the lines below the top line (`nil` with fewer than two lines).
         public var bodyCoreHeight: Double?
+        /// Median gap between consecutive lines below the top line, in pixels (`nil` with fewer than three lines).
+        public var bodyLineGap: Double?
+        /// Pixel columns ignored as vertical streaks while profiling this page.
+        public var suppressedColumns: Int
 
         public init(
             pageIndex: Int,
@@ -247,8 +284,12 @@ public struct RunningHeaderDetector: Sendable {
             firstLineSegments: [Rect2I] = [],
             lastLineSegments: [Rect2I] = [],
             bodyLinePitch: Double? = nil,
-            bodyCoreHeight: Double? = nil
+            bodyCoreHeight: Double? = nil,
+            bodyLineGap: Double? = nil,
+            suppressedColumns: Int = 0
         ) {
+            self.bodyLineGap = bodyLineGap
+            self.suppressedColumns = suppressedColumns
             self.pageIndex = pageIndex
             self.side = side
             self.pageSize = pageSize
@@ -301,6 +342,66 @@ public struct RunningHeaderDetector: Sendable {
             return empty
         }
 
+        // Ignore vertical streaks (page-edge stacks, gutter shadows, rules) and isolated edge noise: they
+        // would fuse every text line or fragment it.
+        let columns = analyzeColumns(in: bitmap, area: area)
+        var work = area
+        if let text = columns.textColumns {
+            work = Rect2I(minX: text.lowerBound, minY: area.minY, maxX: text.upperBound, maxY: area.maxY)
+        }
+        guard !columns.streaks.isEmpty else {
+            return profileRows(of: bitmap, area: work, pageIndex: pageIndex, side: side, suppressedColumns: columns.suppressed)
+        }
+        var cleaned = copy bitmap
+        for range in columns.streaks {
+            for y in area.minY..<area.maxY {
+                for x in range { cleaned.setPixel(x: x, y: y, isBlack: false) }
+            }
+        }
+        return profileRows(of: cleaned, area: work, pageIndex: pageIndex, side: side, suppressedColumns: columns.suppressed)
+    }
+
+    /// Column analysis of a profiled region.
+    private struct ColumnAnalysis {
+        /// Ranges of streak columns to erase.
+        var streaks: [Range<Int>] = []
+        /// Horizontal extent of the main text block when edge noise was trimmed (`nil` when nothing was).
+        var textColumns: Range<Int>? = nil
+        /// Columns ignored (streaks plus trimmed edges).
+        var suppressed = 0
+    }
+
+    private func analyzeColumns(in bitmap: borrowing BinaryBitmap, area: Rect2I) -> ColumnAnalysis {
+        var result = ColumnAnalysis()
+        guard area.height >= 32, area.width >= 64 else { return result }
+        var counts = TextColumnAnalysis.columnInk(bitmap, area: area)
+
+        let streaks = TextColumnAnalysis.streakRanges(counts: counts, area: area, fraction: configuration.streakColumnFraction)
+        result.streaks = streaks
+        result.suppressed = streaks.reduce(0) { $0 + $1.count }
+        for range in streaks {
+            for x in range { counts[x - area.minX] = 0 }
+        }
+
+        if let extent = TextColumnAnalysis.mainTextExtent(
+            counts: counts, areaHeight: area.height, gapFraction: configuration.minColumnIsolationGapFraction
+        ) {
+            result.textColumns = (area.minX + extent.lowerBound)..<(area.minX + extent.upperBound)
+            result.suppressed += area.width - extent.count
+        }
+        return result
+    }
+
+    private func profileRows(
+        of bitmap: borrowing BinaryBitmap,
+        area: Rect2I,
+        pageIndex: Int,
+        side: MarginHarmonizer.PageSide,
+        suppressedColumns: Int
+    ) -> PageLineProfile {
+        let pageSize = Size2I(width: bitmap.width, height: bitmap.height)
+        let empty = PageLineProfile(pageIndex: pageIndex, side: side, pageSize: pageSize, lines: [], suppressedColumns: suppressedColumns)
+
         let wordsPerRow = bitmap.wordsPerRow
         let rowInk = bitmap.withUnsafeWords { words in
             (area.minY..<area.maxY).map { y in
@@ -308,12 +409,14 @@ public struct RunningHeaderDetector: Sendable {
             }
         }
 
+        let minRowInk = max(configuration.minRowInkPixels, Int((configuration.minRowInkFraction * Double(area.width)).rounded(.up)))
+
         // Raw bands: maximal runs of inked rows.
         var spans: [Range<Int>] = []
         var start: Int? = nil
         for (offset, ink) in rowInk.enumerated() {
             let y = area.minY + offset
-            if ink >= configuration.minRowInkPixels {
+            if ink >= minRowInk {
                 if start == nil { start = y }
             } else if let s = start {
                 spans.append(s..<y)
@@ -327,18 +430,21 @@ public struct RunningHeaderDetector: Sendable {
         spans = Self.splitMergedLines(spans, ink: ink)
 
         // Measure, then fold accents and rules into their neighbouring lines.
-        let lines = bitmap.withUnsafeWords { words in
+        var lines = bitmap.withUnsafeWords { words in
             let bands = spans.compactMap {
                 Self.measureBand($0, ink: ink, words: words, wordsPerRow: wordsPerRow, area: area)
             }
             return Self.foldSmallBands(bands, ink: ink, words: words, wordsPerRow: wordsPerRow, area: area)
         }
         guard !lines.isEmpty else { return empty }
+        lines = Self.droppingSpecks(lines, areaWidth: area.width, fraction: configuration.speckFraction)
+        guard !lines.isEmpty else { return empty }
 
         let below = lines.dropFirst()
         let pitches = zip(below, below.dropFirst()).map { Double($1.baselineY - $0.baselineY) }
         let bodyPitch = Self.median(pitches)
         let bodyCore = Self.median(below.map { Double($0.coreHeight) })
+        let bodyGap = Self.median(zip(below, below.dropFirst()).map { Double($1.bounds.minY - $0.bounds.maxY) })
 
         let first = lines[0]
         let firstSegments = Self.segments(of: first, in: bitmap, gapCoreHeights: configuration.minFolioGapCoreHeights)
@@ -354,7 +460,9 @@ public struct RunningHeaderDetector: Sendable {
             firstLineSegments: firstSegments,
             lastLineSegments: lastSegments,
             bodyLinePitch: bodyPitch,
-            bodyCoreHeight: bodyCore
+            bodyCoreHeight: bodyCore,
+            bodyLineGap: bodyGap,
+            suppressedColumns: suppressedColumns
         )
     }
 
@@ -401,7 +509,9 @@ public struct RunningHeaderDetector: Sendable {
                     )
                 }
             } else if let cluster = cluster(candidates.compactMap { i in measures[i].map { (i, $0) } }) {
-                let supported = cluster.members.count >= configuration.minClusterPages
+                // Small sides (a short excerpt) cannot offer many pages: two matching pages are enough there.
+                let minPages = textIndices.count <= 6 ? 2 : configuration.minClusterPages
+                let supported = cluster.members.count >= minPages
                     && Double(cluster.members.count) >= configuration.minClusterFraction * Double(textIndices.count)
                 if supported {
                     members = cluster.members
@@ -482,7 +592,8 @@ public struct RunningHeaderDetector: Sendable {
                         firstBodyLineTopY: body?.bounds.minY,
                         firstBodyBaselineY: body?.baselineY,
                         confidence: confidence,
-                        flags: flags
+                        flags: flags,
+                        bodyLinePitch: profile.bodyLinePitch
                     )
                 } else if let body {
                     anchors[i] = PageTopAnchor(
@@ -492,7 +603,8 @@ public struct RunningHeaderDetector: Sendable {
                         firstBodyLineTopY: body.bounds.minY,
                         firstBodyBaselineY: body.baselineY,
                         confidence: confidence,
-                        flags: flags
+                        flags: flags,
+                        bodyLinePitch: profile.bodyLinePitch
                     )
                 } else {
                     anchors[i] = PageTopAnchor(kind: .none, footerFolioBox: footer, confidence: 0.7, flags: flags + ["folioOnly"])
@@ -535,7 +647,7 @@ public struct RunningHeaderDetector: Sendable {
 
     private func measure(_ profile: PageLineProfile, groupPitch: Double?, groupCore: Double?) -> Measure {
         let lines = profile.lines
-        let pitch = profile.bodyLinePitch ?? groupPitch
+        let pitch = groupPitch ?? profile.bodyLinePitch
         let core = profile.bodyCoreHeight ?? groupCore
         guard lines.count >= 2, let pitch, pitch > 0, let core, core > 0 else {
             let ratio = core.map { Double(lines[0].coreHeight) / max(1, $0) } ?? 1.0
@@ -544,7 +656,14 @@ public struct RunningHeaderDetector: Sendable {
         }
         let offset = Double(lines[1].baselineY - lines[0].baselineY) / pitch
         let ratio = Double(lines[0].coreHeight) / core
-        let separated = offset >= configuration.minHeaderSeparationPitches
+        var separated = offset >= configuration.minHeaderSeparationPitches
+        if !separated && offset >= configuration.minSupportedSeparationPitches {
+            // A header that sits closer to the body still counts when something else sets it apart.
+            let headerGap = Double(lines[1].bounds.minY - lines[0].bounds.maxY)
+            let normalGap = max(0.1 * pitch, profile.bodyLineGap ?? 0)
+            let wideGap = headerGap >= configuration.minHeaderGapRatio * normalGap
+            separated = wideGap || (offset >= 1.2 && hasOuterFolio(profile))
+        }
         let titleLike = ratio > configuration.maxHeaderHeightRatio
         let undersized = ratio < configuration.minHeaderHeightRatio
         return Measure(
@@ -577,6 +696,19 @@ public struct RunningHeaderDetector: Sendable {
         let center = (Self.median(neighbours.map(\.0)) ?? coords[bestSeed].0, Self.median(neighbours.map(\.1)) ?? coords[bestSeed].1)
         let members = Set(points.indices.filter { distance(coords[$0], center) <= 1.0 }.map { points[$0].index })
         return (members, center)
+    }
+
+    /// Whether the top line has a narrow segment at its outer end, as a folio would be.
+    private func hasOuterFolio(_ profile: PageLineProfile) -> Bool {
+        let segments = profile.firstLineSegments
+        guard segments.count >= 2, let header = profile.lines.first else { return false }
+        let maxWidth = configuration.maxFolioWidthCoreHeights * Double(max(1, header.coreHeight))
+        let fits: (Rect2I) -> Bool = { Double($0.width) <= maxWidth }
+        switch profile.side {
+        case .verso: return fits(segments[0])
+        case .recto: return fits(segments[segments.count - 1])
+        case .single: return fits(segments[0]) || fits(segments[segments.count - 1])
+        }
     }
 
     /// A folio at the outer end of the header line, or a header line that is only a folio.
@@ -684,6 +816,17 @@ public struct RunningHeaderDetector: Sendable {
         return result.filter { !$0.isEmpty }
     }
 
+    /// Removes dust: lines much smaller than the page's typical text in both height and width.
+    private static func droppingSpecks(_ lines: [TextLine], areaWidth: Int, fraction: Double) -> [TextLine] {
+        guard fraction > 0, lines.count > 1 else { return lines }
+        let wide = lines.filter { $0.bounds.width * 5 >= areaWidth * 2 }
+        guard let typicalCore = median((wide.isEmpty ? lines : wide).map { Double($0.coreHeight) }), typicalCore > 4 else { return lines }
+        let kept = lines.filter {
+            !(Double($0.bounds.height) < fraction * typicalCore && Double($0.bounds.width) < typicalCore)
+        }
+        return kept.isEmpty ? lines : kept
+    }
+
     /// Measures one band: ink, exact horizontal extent, dense core, and baseline.
     private static func measureBand(
         _ span: Range<Int>,
@@ -751,11 +894,34 @@ public struct RunningHeaderDetector: Sendable {
             }
         }
 
+        // Stacked fragments: a narrow blob (a speckle patch or a folio's tall top) sitting directly on a wider
+        // line it overlaps horizontally belongs to that line, not to a line of its own.
+        let typicalCore = median(items.map { Double($0.line.coreHeight) }) ?? 1
+        i = 0
+        while i + 1 < items.count {
+            let band = items[i]
+            let next = items[i + 1]
+            let stacked = Double(band.line.bounds.width) <= 1.5 * typicalCore
+                && Double(band.line.bounds.height) <= 1.6 * typicalCore
+                && gap(band, next) <= 3
+                && band.line.bounds.minX >= next.line.bounds.minX - 4
+                && band.line.bounds.maxX <= next.line.bounds.maxX + 4
+                && next.line.bounds.width >= 3 * band.line.bounds.width
+            if stacked, var merged = remeasure(band, next) {
+                merged.line.hasRule = next.line.hasRule
+                merged.line.bounds = merged.line.bounds.union(next.line.bounds)
+                items[i + 1] = merged
+                items.remove(at: i)
+            } else {
+                i += 1
+            }
+        }
+
         // Accents and dots: small bands close to a neighbour join it.
         i = 0
         while i < items.count {
             let band = items[i]
-            guard Double(band.line.bounds.height) < 0.45 * typical, items.count > 1 else { i += 1; continue }
+            guard Double(band.line.bounds.height) < 0.6 * typical, items.count > 1 else { i += 1; continue }
             let nearBelow = i + 1 < items.count && gap(band, items[i + 1]) <= 0.6 * typical
             let nearAbove = i > 0 && gap(items[i - 1], band) <= 0.6 * typical
             if nearBelow, var merged = remeasure(band, items[i + 1]) {

@@ -62,6 +62,13 @@ public struct ScanTailorCLI {
         }
     }
 
+    /// One page of the `--diagnostics-dir` text-line dump.
+    struct LineDumpEntry: Codable {
+        var profile: RunningHeaderDetector.PageLineProfile
+        var anchor: PageTopAnchor?
+        var registration: PageVerticalRegistration?
+    }
+
     public struct ProcessOptions: Sendable, Equatable {
         public var inputPDFPath: String
         public var outputPDFPath: String
@@ -88,6 +95,8 @@ public struct ScanTailorCLI {
         public var binarizationMethod: AdaptiveBinarizer.Method = .wolfJolion
         public var usePortableBackend: Bool = false
         public var renderAllDiagnostics: Bool = false
+        public var verticalRegistrationMode: VerticalRegistrationMode = .automatic
+        public var enableRunningHeaderDetection: Bool = true
 
         public init(inputPDFPath: String, outputPDFPath: String) {
             self.inputPDFPath = inputPDFPath
@@ -143,6 +152,8 @@ public struct ScanTailorCLI {
         var binarizeMethod: AdaptiveBinarizer.Method = .wolfJolion
         var usePortable = false
         var allDiagnostics = false
+        var verticalMode: VerticalRegistrationMode = .automatic
+        var enableHeaderDetection = true
 
         var i = 0
         while i < args.count {
@@ -297,6 +308,20 @@ public struct ScanTailorCLI {
             case "--no-desk-mask":
                 enableDeskMask = false
                 i += 1
+            case "--vertical-anchor":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                switch args[i + 1].lowercased() {
+                case "auto", "automatic":
+                    verticalMode = .automatic
+                case "box-top", "boxtop", "off":
+                    verticalMode = .boxTop
+                default:
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                i += 2
+            case "--no-running-headers":
+                enableHeaderDetection = false
+                i += 1
             case "--no-border-fallback":
                 enableBorderFallback = false
                 i += 1
@@ -358,6 +383,8 @@ public struct ScanTailorCLI {
         opts.binarizationMethod = binarizeMethod
         opts.usePortableBackend = usePortable
         opts.renderAllDiagnostics = allDiagnostics
+        opts.verticalRegistrationMode = verticalMode
+        opts.enableRunningHeaderDetection = enableHeaderDetection
         return opts
     }
 
@@ -453,7 +480,9 @@ public struct ScanTailorCLI {
             ocrLanguages: options.ocrLanguages,
             enablePerspectiveRectification: options.enablePerspectiveRectification,
             enableDeskMasking: options.enableDeskMasking,
-            enableBorderFallback: options.enableBorderFallback
+            enableBorderFallback: options.enableBorderFallback,
+            enableRunningHeaderDetection: options.enableRunningHeaderDetection,
+            verticalRegistrationConfiguration: VerticalRegistration.Configuration(mode: options.verticalRegistrationMode)
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -535,6 +564,19 @@ public struct ScanTailorCLI {
                 }
             }
             print("Wrote \(renderedCount) diagnostic overlay PNG(s) to \(diagDirURL.path)")
+
+            // Text-line dump: the lines each page's running-header detection measured, with anchors.
+            if !result.lineProfiles.isEmpty {
+                let stem = outputURL.deletingPathExtension().lastPathComponent
+                let linesURL = diagDirURL.appendingPathComponent("\(stem)-lines.json")
+                let dump = zip(result.lineProfiles, result.manifest.pages).map { profile, record in
+                    LineDumpEntry(profile: profile, anchor: record.topAnchor, registration: record.registration)
+                }
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(dump).write(to: linesURL, options: .atomic)
+                print("Wrote text-line dump to \(linesURL.path)")
+            }
         }
 
         let flaggedPages = result.manifest.pages.filter(\.flaggedLowConfidence)
@@ -609,6 +651,22 @@ public struct ScanTailorCLI {
             let bodyAnchored = anchors.filter { $0.kind == .bodyBaseline }.count
             let unanchored = anchors.filter { $0.kind == .none }.count
             lines.append("Running Headers: \(sides.isEmpty ? "no pages" : sides) | \(bodyAnchored) body-anchored | \(unanchored) none")
+        }
+        if let registration = manifest.verticalRegistration {
+            switch registration.mode {
+            case .boxTop:
+                lines.append("Vertical Registration: box-top (registration disabled)")
+            case .automatic:
+                var text = "Vertical Registration: \(registration.headerPageCount) header · \(registration.bodyPageCount) body · \(registration.preservedPageCount) preserved · \(registration.boxTopPageCount) box-top"
+                if registration.manualPageCount > 0 { text += " · \(registration.manualPageCount) manual" }
+                if let before = registration.headerSpreadBeforePixels, let after = registration.headerSpreadAfterPixels {
+                    text += " | header spread \(before)→\(after) px"
+                }
+                if let before = registration.bodySpreadBeforePixels, let after = registration.bodySpreadAfterPixels {
+                    text += " | body spread \(before)→\(after) px"
+                }
+                lines.append(text)
+            }
         }
         if manifest.physicalScaleAmbiguous {
             lines.append("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true) — escalate to user for --page-size (octavo, trade-paperback, a5, a4, letter) or --input-dpi")
@@ -685,6 +743,9 @@ public struct ScanTailorCLI {
       --no-perspective             Disable document-quad detection and perspective rectification (alias --no-quad)
       --no-desk-mask               Disable residual desk/background masking before binarization
       --no-border-fallback         Disable the macro-cluster border fallback on marginal-geometry pages
+      --vertical-anchor <mode>     Vertical page registration: auto (default; align full-body pages on their running
+                                   header or first body baseline) or box-top (legacy; align content-box tops)
+      --no-running-headers         Disable running-header detection (and with it, vertical registration)
       --no-ocr                     Disable OCR searchable text layer
       --ocr-engine <engine>        OCR engine: apple (default on macOS), tesseract, dual
       --ocr-languages <langs>      Comma or plus-separated language codes, e.g. "grc+lat", "en-US,de-DE", "frk"

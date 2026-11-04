@@ -16,6 +16,8 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
     public var borderFallback: BorderFallbackPolicy?
     /// Per-page running-header policy (`nil` is `.automatic`).
     public var runningHeader: RunningHeaderPolicy?
+    /// Per-page vertical registration policy (`nil` is `.automatic`).
+    public var verticalRegistration: VerticalRegistrationPolicy?
 
     public init(
         overrideSkewDegrees: Double? = nil,
@@ -23,8 +25,10 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
         overrideContentBox: Rect2I? = nil,
         overrideDestinationOrigin: Point2I? = nil,
         borderFallback: BorderFallbackPolicy? = nil,
-        runningHeader: RunningHeaderPolicy? = nil
+        runningHeader: RunningHeaderPolicy? = nil,
+        verticalRegistration: VerticalRegistrationPolicy? = nil
     ) {
+        self.verticalRegistration = verticalRegistration
         self.borderFallback = borderFallback
         self.runningHeader = runningHeader
         self.overrideSkewDegrees = overrideSkewDegrees
@@ -71,6 +75,9 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
     /// Running header / first-baseline top anchor (`nil` when detection is disabled or for
     /// manifests written before Substep 6.1.1).
     public var topAnchor: PageTopAnchor?
+    /// Vertical registration outcome (`nil` when no anchors were available or for manifests
+    /// written before Substep 6.1.2).
+    public var registration: PageVerticalRegistration?
 
     public init(
         outputPageIndex: Int,
@@ -89,10 +96,12 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
         flaggedLowConfidence: Bool,
         manualOverride: PageManualOverride? = nil,
         borderFallback: MacroBorderResult? = nil,
-        topAnchor: PageTopAnchor? = nil
+        topAnchor: PageTopAnchor? = nil,
+        registration: PageVerticalRegistration? = nil
     ) {
         self.borderFallback = borderFallback
         self.topAnchor = topAnchor
+        self.registration = registration
         self.outputPageIndex = outputPageIndex
         self.sourcePageIndex = sourcePageIndex
         self.splitSide = splitSide
@@ -174,6 +183,9 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     /// Book-wide running-header statistics (`nil` when detection is disabled or for manifests
     /// written before Substep 6.1.1).
     public var runningHeaderModel: RunningHeaderModel?
+    /// Book-wide vertical registration summary (`nil` when no anchors were available or for
+    /// manifests written before Substep 6.1.2).
+    public var verticalRegistration: VerticalRegistrationSummary?
 
     public init(
         processingDPI: Int,
@@ -192,9 +204,11 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         contentBoxSize: PhysicalSizeSpec? = nil,
         physicalScaleAmbiguous: Bool = false,
         sourcePageGeometry: [SourcePageGeometryRecord] = [],
-        runningHeaderModel: RunningHeaderModel? = nil
+        runningHeaderModel: RunningHeaderModel? = nil,
+        verticalRegistration: VerticalRegistrationSummary? = nil
     ) {
         self.runningHeaderModel = runningHeaderModel
+        self.verticalRegistration = verticalRegistration
         self.processingDPI = processingDPI
         self.outputDPI = outputDPI
         self.canonicalCanvasSizeAtProcessingDPI = canonicalCanvasSizeAtProcessingDPI
@@ -231,6 +245,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case physicalScaleAmbiguous
         case sourcePageGeometry
         case runningHeaderModel
+        case verticalRegistration
     }
 
     public init(from decoder: Decoder) throws {
@@ -252,6 +267,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.physicalScaleAmbiguous = try container.decodeIfPresent(Bool.self, forKey: .physicalScaleAmbiguous) ?? false
         self.sourcePageGeometry = try container.decodeIfPresent([SourcePageGeometryRecord].self, forKey: .sourcePageGeometry) ?? []
         self.runningHeaderModel = try container.decodeIfPresent(RunningHeaderModel.self, forKey: .runningHeaderModel)
+        self.verticalRegistration = try container.decodeIfPresent(VerticalRegistrationSummary.self, forKey: .verticalRegistration)
     }
 }
 
@@ -341,6 +357,9 @@ public struct BookPipelineCoordinator: Sendable {
         public var enableRunningHeaderDetection: Bool
         /// Running-header detector configuration.
         public var runningHeaderConfiguration: RunningHeaderDetector.Configuration
+        /// Vertical registration configuration. Registration aligns full-body pages on their running
+        /// header (or first body baseline) and needs `enableRunningHeaderDetection`.
+        public var verticalRegistrationConfiguration: VerticalRegistration.Configuration
 
         public init(
             processingDPI: Int = 600,
@@ -376,8 +395,10 @@ public struct BookPipelineCoordinator: Sendable {
             enableBorderFallback: Bool = true,
             borderFallbackMarginalConfidence: Double = 0.70,
             enableRunningHeaderDetection: Bool = true,
-            runningHeaderConfiguration: RunningHeaderDetector.Configuration = RunningHeaderDetector.Configuration()
+            runningHeaderConfiguration: RunningHeaderDetector.Configuration = RunningHeaderDetector.Configuration(),
+            verticalRegistrationConfiguration: VerticalRegistration.Configuration = VerticalRegistration.Configuration()
         ) {
+            self.verticalRegistrationConfiguration = verticalRegistrationConfiguration
             self.enableRunningHeaderDetection = enableRunningHeaderDetection
             self.runningHeaderConfiguration = runningHeaderConfiguration
             self.enableBorderFallback = enableBorderFallback
@@ -429,12 +450,17 @@ public struct BookPipelineCoordinator: Sendable {
         public let manifest: BookProcessingManifest
         public let outputBitmapsAtOutputDPI: [BinaryBitmap]
         public let cleanedBitmapsAtProcessingDPI: [BinaryBitmap]
+        /// Per-page text-line profiles measured for running-header detection (empty when detection
+        /// is disabled). Used for diagnostics (`--diagnostics-dir`).
+        public let lineProfiles: [RunningHeaderDetector.PageLineProfile]
 
         public init(
             manifest: BookProcessingManifest,
             outputBitmapsAtOutputDPI: [BinaryBitmap],
-            cleanedBitmapsAtProcessingDPI: [BinaryBitmap]
+            cleanedBitmapsAtProcessingDPI: [BinaryBitmap],
+            lineProfiles: [RunningHeaderDetector.PageLineProfile] = []
         ) {
+            self.lineProfiles = lineProfiles
             self.manifest = manifest
             self.outputBitmapsAtOutputDPI = outputBitmapsAtOutputDPI
             self.cleanedBitmapsAtProcessingDPI = cleanedBitmapsAtProcessingDPI
@@ -1293,6 +1319,7 @@ public struct BookPipelineCoordinator: Sendable {
         // --- Running headers & top baselines (telemetry only; changes no pixels) ---
         var topAnchors: [PageTopAnchor?] = Array(repeating: nil, count: pass1Pages.count)
         var runningHeaderModel: RunningHeaderModel? = nil
+        var lineProfiles: [RunningHeaderDetector.PageLineProfile] = []
         if configuration.enableRunningHeaderDetection && !pass1Pages.isEmpty {
             let headerDetector = RunningHeaderDetector(configuration: configuration.runningHeaderConfiguration)
             let profiles = pass1Pages.map { p in
@@ -1307,6 +1334,7 @@ public struct BookPipelineCoordinator: Sendable {
             for p in pass1Pages {
                 if let policy = p.manualOverride?.runningHeader { policies[p.outputPageIndex] = policy }
             }
+            lineProfiles = profiles
             let analysis = headerDetector.analyzeBook(profiles, policies: policies)
             topAnchors = analysis.anchors.map(Optional.some)
             runningHeaderModel = analysis.model
@@ -1350,34 +1378,43 @@ public struct BookPipelineCoordinator: Sendable {
         var postCalibrationGlyphMetrics: [FontScaleAnalyzer.PageGlyphMetrics] = []
         postCalibrationGlyphMetrics.reserveCapacity(sampledGlyphPageIndices.count)
 
+        // Apply manual overrides to the harmonizer's plans, then register full-body pages vertically.
+        var overriddenPlans = bookLayout.pagePlans
         for (idx, p1) in pass1Pages.enumerated() {
-            var plan = bookLayout.pagePlans[idx]
             if let customOrigin = p1.manualOverride?.overrideDestinationOrigin {
-                plan = MarginHarmonizer.PageLayoutPlan(
-                    pageIndex: plan.pageIndex,
-                    side: plan.side,
-                    tier: plan.tier,
-                    wasOutlierTrimmed: plan.wasOutlierTrimmed,
-                    sourceContentBox: plan.sourceContentBox,
-                    retainedClusterBoxes: plan.retainedClusterBoxes,
-                    rejectedClusterBoxes: plan.rejectedClusterBoxes,
-                    destinationOrigin: customOrigin,
-                    canvasSize: plan.canvasSize
-                )
+                overriddenPlans[idx].destinationOrigin = customOrigin
             }
             if let customBox = p1.manualOverride?.overrideContentBox {
-                plan = MarginHarmonizer.PageLayoutPlan(
-                    pageIndex: plan.pageIndex,
-                    side: plan.side,
-                    tier: plan.tier,
-                    wasOutlierTrimmed: false,
-                    sourceContentBox: customBox,
-                    retainedClusterBoxes: [customBox],
-                    rejectedClusterBoxes: plan.rejectedClusterBoxes,
-                    destinationOrigin: p1.manualOverride?.overrideDestinationOrigin ?? plan.destinationOrigin,
-                    canvasSize: plan.canvasSize
+                overriddenPlans[idx].wasOutlierTrimmed = false
+                overriddenPlans[idx].sourceContentBox = customBox
+                overriddenPlans[idx].retainedClusterBoxes = [customBox]
+            }
+        }
+        var registrationRecords: [PageVerticalRegistration?] = Array(repeating: nil, count: pass1Pages.count)
+        var registrationSummary: VerticalRegistrationSummary? = nil
+        if configuration.enableRunningHeaderDetection && !pass1Pages.isEmpty {
+            let registration = VerticalRegistration(configuration: configuration.verticalRegistrationConfiguration)
+            let inputs = pass1Pages.enumerated().map { idx, p1 in
+                VerticalRegistration.PageInput(
+                    plan: overriddenPlans[idx],
+                    anchor: topAnchors[idx],
+                    policy: p1.manualOverride?.verticalRegistration,
+                    hasManualOrigin: p1.manualOverride?.overrideDestinationOrigin != nil
                 )
             }
+            let registered = registration.register(
+                pages: inputs,
+                versoFrame: bookLayout.versoCanonicalFrame,
+                rectoFrame: bookLayout.rectoCanonicalFrame,
+                bodyLinePitch: VerticalRegistration.typicalPitch(of: runningHeaderModel)
+            )
+            overriddenPlans = registered.plans
+            registrationRecords = registered.records.map(Optional.some)
+            registrationSummary = registered.summary
+        }
+
+        for (idx, p1) in pass1Pages.enumerated() {
+            let plan = overriddenPlans[idx]
 
             let framed600 = harmonizer.renderPage(from: p1.cleanedBitmap, plan: plan)
             let finalBitmap: BinaryBitmap
@@ -1467,7 +1504,8 @@ public struct BookPipelineCoordinator: Sendable {
                     flaggedLowConfidence: flagged,
                     manualOverride: p1.manualOverride,
                     borderFallback: p1.borderFallback,
-                    topAnchor: topAnchors[idx]
+                    topAnchor: topAnchors[idx],
+                    registration: registrationRecords[idx]
                 )
             )
             outputBitmaps.append(finalBitmap)
@@ -1528,13 +1566,15 @@ public struct BookPipelineCoordinator: Sendable {
             contentBoxSize: effectiveContentBoxSize,
             physicalScaleAmbiguous: physicalScaleAmbiguous,
             sourcePageGeometry: sourceGeometry,
-            runningHeaderModel: runningHeaderModel
+            runningHeaderModel: runningHeaderModel,
+            verticalRegistration: registrationSummary
         )
 
         return PipelineOutput(
             manifest: manifest,
             outputBitmapsAtOutputDPI: outputBitmaps,
-            cleanedBitmapsAtProcessingDPI: cleanedBitmaps
+            cleanedBitmapsAtProcessingDPI: cleanedBitmaps,
+            lineProfiles: lineProfiles
         )
     }
 

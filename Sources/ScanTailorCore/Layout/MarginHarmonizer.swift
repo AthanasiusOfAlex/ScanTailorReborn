@@ -31,6 +31,16 @@ public struct MarginHarmonizer: Sendable {
         case standaloneFloating
     }
 
+    /// Which vertical edge of a Tier 2 (`edgeAnchoredPartial`) page was pinned to the canonical frame.
+    public enum VerticalAnchorEdge: String, Sendable, Equatable, Codable {
+        /// The content top sits on the frame top (chapter ending: free space below).
+        case top
+        /// The content bottom sits on the frame bottom (chapter opening: free sinkage above).
+        case bottom
+        /// Neither edge matched; the page keeps its natural vertical position.
+        case natural
+    }
+
     public struct Configuration: Sendable, Equatable {
         /// Horizontal margin padding in pixels (at 600 DPI) around the canonical text block when auto-sizing the output canvas.
         public var canonicalHorizontalMarginAt600DPI: Int {
@@ -138,17 +148,20 @@ public struct MarginHarmonizer: Sendable {
         /// Assigned 3-tier placement policy.
         public let tier: PlacementTier
         /// Whether Pass 2 canonical-width outlier trimming modified this page's content box.
-        public let wasOutlierTrimmed: Bool
+        public var wasOutlierTrimmed: Bool
         /// Refined content bounding box in the source page's coordinate space (`nil` if blank page).
-        public let sourceContentBox: Rect2I?
+        public var sourceContentBox: Rect2I?
         /// Retained foreground cluster boxes in source page coordinates.
-        public let retainedClusterBoxes: [Rect2I]
+        public var retainedClusterBoxes: [Rect2I]
         /// Rejected noise cluster boxes in source page coordinates (including any Pass 2 trimmed smudges).
         public let rejectedClusterBoxes: [Rect2I]
         /// Target destination origin `(x, y)` on the canonical output canvas where `sourceContentBox.origin` is placed.
-        public let destinationOrigin: Point2I
+        public var destinationOrigin: Point2I
         /// Target canonical output canvas dimensions in pixels (at `dpi`, typically 600 DPI).
         public let canvasSize: Size2I
+        /// For Tier 2 pages, which vertical edge was pinned to the canonical frame (`nil` for
+        /// Tiers 1 and 3 and for plans written before Substep 6.1.2).
+        public var verticalAnchorEdge: VerticalAnchorEdge?
 
         public init(
             pageIndex: Int,
@@ -159,8 +172,10 @@ public struct MarginHarmonizer: Sendable {
             retainedClusterBoxes: [Rect2I],
             rejectedClusterBoxes: [Rect2I],
             destinationOrigin: Point2I,
-            canvasSize: Size2I
+            canvasSize: Size2I,
+            verticalAnchorEdge: VerticalAnchorEdge? = nil
         ) {
+            self.verticalAnchorEdge = verticalAnchorEdge
             self.pageIndex = pageIndex
             self.side = side
             self.tier = tier
@@ -435,6 +450,7 @@ public struct MarginHarmonizer: Sendable {
 
             let tier: PlacementTier
             let destOrigin: Point2I
+            var anchorEdge: VerticalAnchorEdge? = nil
 
             if matchesCanonicalWidth && matchesCanonicalHeight {
                 // Tier 1 — Full Body Page:
@@ -459,6 +475,7 @@ public struct MarginHarmonizer: Sendable {
                     // Chapter opening with top sinkage: anchor bottom edge to targetFrame.maxY
                     // (preserving natural top sinkage!).
                     tier = .edgeAnchoredPartial
+                    anchorEdge = .bottom
                     let anchoredY = Self.clampOrigin(
                         targetFrame.maxY - box.height,
                         span: box.height,
@@ -468,10 +485,12 @@ public struct MarginHarmonizer: Sendable {
                 } else if topDistToCanon <= edgeAnchorTol {
                     // Chapter ending with bottom whitespace: anchor top edge to targetFrame.minY.
                     tier = .edgeAnchoredPartial
+                    anchorEdge = .top
                     destOrigin = Point2I(x: targetFrame.minX, y: targetFrame.minY)
                 } else {
                     // Full-width block floating vertically at a custom position: keep natural Y, lock X to canonical margin.
                     tier = .edgeAnchoredPartial
+                    anchorEdge = .natural
                     let clampedY = Self.clampOrigin(naturalTopY, span: box.height, canvasSpan: canvasSize.height)
                     destOrigin = Point2I(x: targetFrame.minX, y: clampedY)
                 }
@@ -504,7 +523,8 @@ public struct MarginHarmonizer: Sendable {
                     retainedClusterBoxes: det.retainedClusters.map(\.exactBounds),
                     rejectedClusterBoxes: det.rejectedBoxes,
                     destinationOrigin: destOrigin,
-                    canvasSize: canvasSize
+                    canvasSize: canvasSize,
+                    verticalAnchorEdge: anchorEdge
                 )
             )
         }

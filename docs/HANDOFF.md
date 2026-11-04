@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-04  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 6, Step 6.1, Substep 6.1.1 done. Next: **Substep 6.1.2 — Vertical Page Registration Anchor** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
+**Current Active Milestone**: Phase 6, Step 6.1 complete (6.1.1, 6.1.2 done). Next: **Substep 6.2.1 — Consensus Dimension Clustering** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -25,7 +25,7 @@ Run from the repository root:
 swift build
 swift test
 ```
-All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **140 tests across 23 suites**, passing with 0 warnings).
+All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps at runtime and have **zero external file dependencies** (currently **164 tests across 26 suites**, 4 of them the skipped opt-in corpus tests, passing with 0 warnings). The one exception is the opt-in real-book suite [`RealCorpusTests`](../Tests/ScanTailorAppleBackendTests/RealCorpusTests.swift), skipped unless `SCANTAILOR_CORPUS_DIR` is set (see §1.3).
 
 ### 1.3 Notes on Git-Ignored & External Items
 - **Git Remote**: Check `git remote -v`. If no remote is configured when migrating, either push `main` to a new remote (`git remote add origin <url> && git push -u origin main`) or transfer via `git bundle create scantailor.bundle --all`.
@@ -35,6 +35,11 @@ All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps
   - `vermeersch.1934` (*Vermeersch 1934* — photocopied two-page spreads with dark gutter seams)
   - `simpson.1968/simpson.1968.400-403.pdf` (*Simpson 1968* — handheld smartphone camera spread wrapped at 72 DPI)
   These files are **not** needed for `swift test`, only for optional empirical CLI runs and Phase 7.1 benchmark verification.
+- **Opt-in real-book tests (Substep 6.1.2)**: `RealCorpusTests` reads short excerpts straight from the library (no scans are copied into the repo): `flannery.1993` pp. 1–8, `gury.1866` pp. 300–307, `vermeersch.1934` pp. 1–6, and `long.2015` spreads 57–59 (folios 110–115). Point `SCANTAILOR_CORPUS_DIR` at the folder that holds the book folders and run them **in release** (about 20 s; a debug build needs about half an hour):
+  ```bash
+  SCANTAILOR_CORPUS_DIR="$HOME/Library/CloudStorage/OneDrive-MRC/PDFs-in-the-making" swift test -c release --filter RealCorpusTests
+  ```
+  Real scans are in `<book>/00-pdf-orig/` (occasionally `00-jpeg-orig`). `scantailor-cli process … --diagnostics-dir <dir>` writes `<stem>-lines.json` there (every page's detected text lines, anchor and registration) for debugging detector misses.
 
 ---
 
@@ -55,12 +60,12 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
   - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **Completed**
   - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **Completed**
-  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1` done)
+  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1`, `6.1.2` done)
   - **Phase 7**: Verification & Final `v1.0.0` Release (`7.1.1` – `7.2.2`) — Pending
 
 ---
 
-## 3. Completed Substeps (`4.1.1`–`6.1.1`)
+## 3. Completed Substeps (`4.1.1`–`6.1.2`)
 
 ### 3.1 Recently Completed: Substep 4.1.1 (`FontScaleAnalyzer`)
 Implemented automatic font-scale heuristic, median glyph height analyzer, and pre-raster camera-wrapper scale rescue across 4 source/CLI/test layers:
@@ -202,20 +207,30 @@ Opens Phase 6. Every page now gets a **top anchor**: the running header's baseli
 5. **Anchor** (`PageTopAnchor`): `kind` (`runningHeader` / `bodyBaseline` / `none`), `anchorY`, `headerBox`, `headerBaselineY`, `folioBox`, `footerFolioBox`, `firstBodyLineTopY`, `firstBodyBaselineY`, `confidence`, `flags` (`header:outOfCluster`, `header:sizeMismatch`, `titleLike`, `sinkage`, `book:tooFewPages`, `override:*`, `noText`). Coordinates are pass-1 page coordinates at processing DPI (after split/deskew/dewarp, before framing) — 6.1.2 must map them through the layout plan.
 6. **Manifest/overrides/CLI**: `PageProcessingRecord.topAnchor`, `BookProcessingManifest.runningHeaderModel` (`RunningHeaderModel.sides`: page/header/footer-folio counts, body pitch and core, cluster center), both `decodeIfPresent`. `PageManualOverride.runningHeader: RunningHeaderPolicy?` (`automatic` / `present` = top line is the header / `absent` = top line is body). Coordinator `Configuration.enableRunningHeaderDetection` (default `true`) + `runningHeaderConfiguration`; no CLI flag (output is unchanged). Summary line `Running Headers: verso H/N · recto H/N | N body-anchored | N none`. Runs between pass 1 and pass 2; geometry only, no OCR.
 7. **Tests**: [`RunningHeaderDetectionTests.swift`](../Tests/ScanTailorCoreTests/RunningHeaderDetectionTests.swift) (7): line profile (baseline/core/pitch ±2 px, blank regions), header rule and touching-line split, 10-page alternating book with ±40 px jitter (headers + outer folios confirmed), chapter opener (`titleLike` + `sinkage`), headerless page and footer folio, scattered section headings forming no cluster, `present`/`absent` overrides + `tooFewPages` + blank page + config clamping, and pipeline integration (anchors recorded, override, **identical output bitmaps with detection off**, JSON round trip, legacy manifest). `140/140` pass across 23 suites, 0 warnings.
-8. **Known limitations**: headers the content-box detector already rejected (gap > 14 % of page height) are out of reach; two-column bodies starting at different heights give a noisy first baseline; a body whose first line is an unusual heading is measured off and simply falls out of the cluster (flagged). Synthetic fixtures only — validate on the real corpus during 6.1.2.
+8. **Known limitations**: headers the content-box detector already rejected (gap > 14 % of page height) are out of reach; two-column bodies starting at different heights give a noisy first baseline; a body whose first line is an unusual heading is measured off and simply falls out of the cluster (flagged). The synthetic fixtures were not enough: the real corpus exposed four further failures, fixed in 6.1.2 (§3.11).
+
+### 3.11 Recently Completed: Substep 6.1.2 (Vertical Page Registration Anchor)
+Completes Step 6.1. Full-body pages are now placed so their **running-header baseline** (or, without headers, their **first body baseline**) lands on one book-wide line, instead of letting the content-box top land on the frame top. Pixels change; `--vertical-anchor box-top` reproduces the old output exactly.
+1. **Real-corpus calibration first.** Run on Flannery, Gury, Vermeersch, Long (folios 110–115) and Simpson, 6.1.1 only worked on Flannery. Fixes, all in [`RunningHeaderDetector.swift`](../Sources/ScanTailorCore/Layout/RunningHeaderDetector.swift) unless noted: (a) **column analysis** ([`TextColumnAnalysis.swift`](../Sources/ScanTailorCore/Layout/TextColumnAnalysis.swift)): columns inked over ≥ 70 % of the height are erased (vertical rules/streaks), and column groups cut off from the text block by an empty gap ≥ 0.5 % of the width and carrying < 20 % of its ink are dropped (page-edge stacks, scanner noise) — inside text every column crosses many lines, so only noise sits behind a gap; (b) a row counts as inked only above 0.6 % of the width (faint dotted noise no longer bridges lines); (c) **specks** (smaller than half a core height *and* narrower than a core) are dropped, so dust above a header no longer becomes the top line; (d) narrow blobs stacked on a wider line they overlap fold into it; accent folding widened to < 0.6 typical height; (e) a header counts at ≥ 1.05 pitches when the gap under it is ≥ 2× the normal inter-line gap (Gury: 1.15 pitches, gap 52 vs 14 px), or at ≥ 1.2 with an outer folio segment; (f) offsets use the side's median pitch rather than the page's own; (g) sides with ≤ 6 text pages need only 2 matching pages to confirm headers.
+2. **Content box** ([`ContentBoxDetector.swift`](../Sources/ScanTailorCore/Layout/ContentBoxDetector.swift), Step 4): the same column-group test rejects edge textures from the content box (`edgeNoiseIsolationGapFraction`, default 1 %). On Long this shrank the verso content box from 3,346 to about 2,650 px, the canonical frame from 3,329 to 2,817 px, and turned five Tier 3 recto pages back into Tier 1. Pages with such textures now report slightly lower detection confidence (the rejected ink counts against it).
+3. **Registration** ([`VerticalRegistration.swift`](../Sources/ScanTailorCore/Layout/VerticalRegistration.swift), pure, runs in the coordinator after per-page overrides are applied and before pass 3): header line = frame top + median(header baseline − content top); body line = header line + median(header → first body baseline), or frame top + median(first body baseline − content top) in a book without headers. Medians of the pages themselves, so the typical page does not move. New y = line − (anchor − content top); x is never touched; no even-pixel snapping is needed because every registered baseline lands on the same canvas row.
+4. **Who is registered**: `fullBody` pages and `edgeAnchoredPartial` pages pinned by their top edge (new `PageLayoutPlan.verticalAnchorEdge` = `top`/`bottom`/`natural`, recorded by the harmonizer, `decodeIfPresent`). **Preserved** (kept as placed): Tier 3, Tier 2 bottom/natural, `titleLike`, `sinkage`, blank. **Left on box-top** with a flag: no anchor, confidence < 0.5, `header:outOfCluster`/`sizeMismatch` (`registration:ambiguousTop`), anchor outside the box, page line pitch > 30 % off the book's (`registration:atypicalLines`), a body-anchored page on a side where no header was found while the other side has them (`registration:headersUndetectedOnSide` — likelier a missed header than a headerless page), or a shift over min(3 pitches, 12 % of frame height) (`registration:shiftTooLarge`). Headerless pages in a header book align their first body baseline to the **body line**, so body text does not jump. Shifts are clamped to the canvas (`registration:clamped`).
+5. **Manifest/overrides/CLI**: `PageProcessingRecord.registration` (`method` header/bodyBaseline/preserved/boxTop/manual, `shiftPixels`, `anchorCanvasY`, `flags`) and `BookProcessingManifest.verticalRegistration` (mode, header/body line Y, counts, max shift, header and body baseline **spread before → after** — the jitter metric for criterion 4 / Phase 7.1), all `decodeIfPresent`. `PageManualOverride.verticalRegistration`: `automatic` / `anchor` (force: skips tier, confidence and shift checks) / `boxTop`; a manual `overrideDestinationOrigin` always wins (`manual`). CLI `--vertical-anchor auto|box-top` and `--no-running-headers` (no anchors, so no registration); `inspect` prints `Vertical Registration: N header · N body · N preserved · N box-top | header spread a→b px | body spread a→b px`. `process --diagnostics-dir` also writes `<stem>-lines.json`. Coordinator `Configuration.verticalRegistrationConfiguration`.
+6. **Tests**: [`VerticalRegistrationTests.swift`](../Tests/ScanTailorCoreTests/VerticalRegistrationTests.swift) (12: header line, headerless page, headerless book, every eligibility/fallback reason, guards and clamp, overrides and box-top mode, coding, harmonizer edges, CLI, and a pipeline test that **re-profiles the rendered bitmaps** — header baselines within 1 px with registration, 4+ px jitter with box-top), [`RunningHeaderCalibrationTests.swift`](../Tests/ScanTailorCoreTests/RunningHeaderCalibrationTests.swift) (8, synthetic copies of the real failures; note that synthetic glyph rectangles must not line up from line to line, or they look like streaks), and the opt-in [`RealCorpusTests.swift`](../Tests/ScanTailorAppleBackendTests/RealCorpusTests.swift) (4). Results on the real samples: Flannery 6 header pages, spread 9→0 px; Gury 5 header pages, 12→0 (both sides detected); **Long folios 110–115: 6/6 headers, all Tier 1, header spread 3→0 px and rendered baselines identical, fore-edge texture gone**; Long spreads 56–60: 10/10 headers, 15→0 px; Vermeersch pp. 1–6: verso headers found, 2 pages registered.
+7. **Known limitations / hand-offs**: (a) header-to-first-body distance varies by up to ~20 px on some pages even in clean scans (Flannery body spread 24→21 px), so registering on the header leaves body lines slightly off — measured, not fixed; (b) **Simpson 1968** (`simpson.1968.400-403.pdf`): camera spreads are not cropped or split properly (table and desk kept, canvas 6,798 px wide) — a Phase 5 problem, untouched; (c) **Vermeersch**: pages beside spine noise or with the header fused to a noise patch still miss headers, and short excerpts leave several pages in Tier 3; (d) the left-over noise patch beside folios (Long) is still rendered; (e) registration is vertical only — horizontal re-centering stays with 6.2.x; (f) the pipeline test takes about a minute in debug.
 
 ---
 
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 6, Substep 6.1.2**, copy and provide the following prompt:
+To begin **Phase 6, Substep 6.2.1**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 6.1.2 — Vertical Page Registration Anchor.
+We are resuming ScanTailorReborn on Substep 6.2.1 — Consensus Dimension Clustering.
 
 1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 2–3, especially §3.10) and `docs/WHITE_PAPER.md` Phase 6, Step 6.1 plus release criteria 4 and 5.
-3. Propose a design for aligning `fullBody` pages by their `PageTopAnchor.anchorY` (mapped through the layout plan) instead of content-box top, while preserving sinkage on `edgeAnchoredPartial` and `standaloneFloating` pages; cover API, manifest telemetry, overrides, a CLI switch, and tests. Pause for approval before implementing.
+2. Review `docs/HANDOFF.md` (Sections 2–3, especially §3.10–3.11) and `docs/WHITE_PAPER.md` Phase 6, Step 6.2 plus the release criteria on canonical page size. Real books for checking: §1.3 (opt-in `RealCorpusTests`, `--diagnostics-dir` line dump).
+3. Propose a design for grouping processed pages into canonical body pages versus legitimate dimensional outliers (cover pages, foldout plates) with IQR and median consensus metrics; cover API, manifest telemetry, overrides, a CLI switch, and tests. Pause for approval before implementing.
 4. After approval, implement with tests, run `swift test`, and confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 6.2.1.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Substep 6.2.2.
 ```

@@ -26,6 +26,10 @@ public struct ContentBoxDetector: Sendable {
         /// Maximum horizontal overhang (as a fraction of page width) allowed for a small header/footer
         /// outside the main text block's horizontal span.
         public var headerFooterHorizontalToleranceFraction: Double
+        /// Column groups cut off from the main text block by an empty gap of at least this fraction of the
+        /// content width, and carrying little ink, are rejected (page-edge stack textures, gutter shadows).
+        /// `0` disables the check.
+        public var edgeNoiseIsolationGapFraction: Double
 
         public init(
             cleanBordersFirst: Bool = true,
@@ -35,8 +39,10 @@ public struct ContentBoxDetector: Sendable {
             splitEdgeExclusionFraction: Double = 0.04,
             minClusterForegroundPixelsAt600DPI: Int = 36,
             maxHeaderFooterGapFraction: Double = 0.14,
-            headerFooterHorizontalToleranceFraction: Double = 0.04
+            headerFooterHorizontalToleranceFraction: Double = 0.04,
+            edgeNoiseIsolationGapFraction: Double = 0.01
         ) {
+            self.edgeNoiseIsolationGapFraction = edgeNoiseIsolationGapFraction <= 0 ? 0 : min(max(0.003, edgeNoiseIsolationGapFraction), 0.5)
             self.cleanBordersFirst = cleanBordersFirst
             self.closingBrickWidthAt600DPI = max(8, closingBrickWidthAt600DPI)
             self.closingBrickHeightAt600DPI = max(2, closingBrickHeightAt600DPI)
@@ -418,6 +424,30 @@ public struct ContentBoxDetector: Sendable {
         var finalContentBox = retainedAll[0].exactBounds
         for c in retainedAll.dropFirst() {
             finalContentBox = finalContentBox.union(c.exactBounds)
+        }
+
+        // Step 4: Reject edge textures (page-edge stacks, gutter shadows) that sit behind an empty gap.
+        if configuration.edgeNoiseIsolationGapFraction > 0,
+           let area = finalContentBox.clamped(to: Rect2I(x: 0, y: 0, width: width, height: height)) {
+            let counts = TextColumnAnalysis.columnInk(cleaned, area: area)
+            if let extent = TextColumnAnalysis.mainTextExtent(
+                counts: counts, areaHeight: area.height, gapFraction: configuration.edgeNoiseIsolationGapFraction
+            ) {
+                let keepRange = (area.minX + extent.lowerBound)..<(area.minX + extent.upperBound)
+                let kept = retainedAll.filter { $0.exactBounds.maxX > keepRange.lowerBound && $0.exactBounds.minX < keepRange.upperBound }
+                if !kept.isEmpty && kept.count < retainedAll.count {
+                    for cluster in retainedAll where !kept.contains(cluster) {
+                        rejectedBoxes.append(cluster.exactBounds)
+                    }
+                    retainedAll = kept
+                    finalContentBox = kept[0].exactBounds
+                    for c in kept.dropFirst() { finalContentBox = finalContentBox.union(c.exactBounds) }
+                    let keptBody = retainedBody.filter { kept.contains($0) }
+                    if let first = keptBody.first {
+                        mainBodyBox = keptBody.dropFirst().reduce(first.exactBounds) { $0.union($1.exactBounds) }
+                    }
+                }
+            }
         }
 
         let retainedMass = retainedAll.reduce(0) { $0 + $1.foregroundPixels }
