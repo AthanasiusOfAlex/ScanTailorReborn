@@ -12,13 +12,17 @@ public struct PageManualOverride: Sendable, Equatable, Codable {
     public var overrideContentBox: Rect2I?
     /// Optional manual destination origin on the 600 DPI canonical output canvas.
     public var overrideDestinationOrigin: Point2I?
+    /// Per-page policy for the macro-cluster border fallback (`nil` is `.automatic`).
+    public var borderFallback: BorderFallbackPolicy?
 
     public init(
         overrideSkewDegrees: Double? = nil,
         disableDewarp: Bool? = nil,
         overrideContentBox: Rect2I? = nil,
-        overrideDestinationOrigin: Point2I? = nil
+        overrideDestinationOrigin: Point2I? = nil,
+        borderFallback: BorderFallbackPolicy? = nil
     ) {
+        self.borderFallback = borderFallback
         self.overrideSkewDegrees = overrideSkewDegrees
         self.disableDewarp = disableDewarp
         self.overrideContentBox = overrideContentBox
@@ -58,6 +62,8 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
     public var flaggedLowConfidence: Bool
     /// Optional user-editable manual overrides for incremental re-runs.
     public var manualOverride: PageManualOverride?
+    /// Macro-cluster border fallback telemetry (`nil` when the fallback was not engaged).
+    public var borderFallback: MacroBorderResult?
 
     public init(
         outputPageIndex: Int,
@@ -74,8 +80,10 @@ public struct PageProcessingRecord: Sendable, Equatable, Codable {
         layoutPlan: MarginHarmonizer.PageLayoutPlan,
         overallConfidence: Double,
         flaggedLowConfidence: Bool,
-        manualOverride: PageManualOverride? = nil
+        manualOverride: PageManualOverride? = nil,
+        borderFallback: MacroBorderResult? = nil
     ) {
+        self.borderFallback = borderFallback
         self.outputPageIndex = outputPageIndex
         self.sourcePageIndex = sourcePageIndex
         self.splitSide = splitSide
@@ -306,6 +314,12 @@ public struct BookPipelineCoordinator: Sendable {
         public var enableDeskMasking: Bool
         /// Desk/background masker configuration.
         public var deskMaskerConfiguration: PaperRegionMasker.Configuration
+        /// Whether the macro-cluster border fallback may run on pages whose geometry telemetry is
+        /// marginal (default: `true`). A per-page `forced` override still engages it when `true`.
+        public var enableBorderFallback: Bool
+        /// Quadrangle detections below this confidence count as marginal and engage the border
+        /// fallback (default: `0.70`).
+        public var borderFallbackMarginalConfidence: Double
 
         public init(
             processingDPI: Int = 600,
@@ -337,8 +351,12 @@ public struct BookPipelineCoordinator: Sendable {
             quadDetectorConfiguration: DocumentQuadDetector.Configuration = DocumentQuadDetector.Configuration(),
             rectifierConfiguration: PerspectiveRectifier.Configuration = PerspectiveRectifier.Configuration(),
             enableDeskMasking: Bool = true,
-            deskMaskerConfiguration: PaperRegionMasker.Configuration = PaperRegionMasker.Configuration()
+            deskMaskerConfiguration: PaperRegionMasker.Configuration = PaperRegionMasker.Configuration(),
+            enableBorderFallback: Bool = true,
+            borderFallbackMarginalConfidence: Double = 0.70
         ) {
+            self.enableBorderFallback = enableBorderFallback
+            self.borderFallbackMarginalConfidence = min(1.0, max(0.0, borderFallbackMarginalConfidence))
             self.processingDPI = max(150, processingDPI)
             self.outputDPI = max(72, outputDPI)
             self.inputDPI = inputDPI.map { max(1, $0) }
@@ -727,6 +745,7 @@ public struct BookPipelineCoordinator: Sendable {
         let cleanedBitmap: BinaryBitmap
         let detection: ContentBoxDetector.DetectionResult
         let manualOverride: PageManualOverride?
+        let borderFallback: MacroBorderResult?
     }
 
     /// Runs the complete 3-pass pipeline directly on an array of source `GrayscaleBuffer` scans
@@ -1091,7 +1110,15 @@ public struct BookPipelineCoordinator: Sendable {
 
                 // 1b. Binarize deskewed page for text-line tracing & possible 3D cubic-sheet dewarping
                 let initialBinary = binarizer.binarize(deskewedGray, accelerator: accelerator)
-                let initialCleaned = cleaner.clean(initialBinary)
+                let fallbackContext = configuration.enableBorderFallback
+                    ? geometryRecord.borderFallbackContext(
+                        splitSide: slice.side,
+                        policy: manualOverride?.borderFallback,
+                        marginalConfidence: configuration.borderFallbackMarginalConfidence
+                    )
+                    : nil
+                let (initialCleaned, initialFallback) = cleaner.clean(initialBinary, fallback: fallbackContext)
+                var borderFallbackResult = initialFallback
 
                 let tracedLines = tracer.traceLines(in: initialCleaned)
                 let pageSize = Size2I(width: deskewedGray.width, height: deskewedGray.height)
@@ -1133,7 +1160,9 @@ public struct BookPipelineCoordinator: Sendable {
                                 accelerator: accelerator,
                                 glyphScale: dewarpedGlyphScale
                             )
-                            finalCleaned = cleaner.clean(dewarpedBinary)
+                            let (dewarpedCleaned, dewarpedFallback) = cleaner.clean(dewarpedBinary, fallback: fallbackContext)
+                            finalCleaned = dewarpedCleaned
+                            borderFallbackResult = dewarpedFallback
                             dewarpApplied = true
                         }
                     }
@@ -1229,7 +1258,8 @@ public struct BookPipelineCoordinator: Sendable {
                         tracedLines: tracedLines,
                         cleanedBitmap: finalCleaned,
                         detection: detection,
-                        manualOverride: manualOverride
+                        manualOverride: manualOverride,
+                        borderFallback: borderFallbackResult
                     )
                 )
             }
@@ -1388,7 +1418,8 @@ public struct BookPipelineCoordinator: Sendable {
                     layoutPlan: plan,
                     overallConfidence: overallConfidence,
                     flaggedLowConfidence: flagged,
-                    manualOverride: p1.manualOverride
+                    manualOverride: p1.manualOverride,
+                    borderFallback: p1.borderFallback
                 )
             )
             outputBitmaps.append(finalBitmap)

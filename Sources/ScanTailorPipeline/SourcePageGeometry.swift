@@ -175,3 +175,56 @@ extension BookPipelineCoordinator {
         return (maskedPage, updated)
     }
 }
+
+extension SourcePageGeometryRecord {
+    /// Builds the engagement context for the macro-cluster border fallback of one output slice.
+    ///
+    /// The fallback runs only when upstream telemetry is marginal: a rejected or low-confidence
+    /// quadrangle, an occluded/corner-fallback/low-contrast detection, or a desk mask that was
+    /// capped or declined to trust a boundary. Confident pages return `nil`.
+    ///
+    /// - Parameters:
+    ///   - splitSide: Which part of the source page the slice is; the gutter side is never eligible.
+    ///   - policy: Per-page override (`nil` is `.automatic`).
+    ///   - marginalConfidence: Detections below this confidence count as marginal.
+    func borderFallbackContext(
+        splitSide: PageSide,
+        policy: BorderFallbackPolicy?,
+        marginalConfidence: Double
+    ) -> MacroBorderContext? {
+        let policy = policy ?? .automatic
+        guard policy != .disabled else { return nil }
+
+        let sides: Set<DocumentQuadDetection.Side>
+        switch splitSide {
+        case .single: sides = [.top, .right, .bottom, .left]
+        case .leftVerso: sides = [.top, .bottom, .left]
+        case .rightRecto: sides = [.top, .bottom, .right]
+        }
+
+        var triggers: [String] = []
+        if policy == .forced { triggers.append("forced") }
+        if let detection {
+            switch detection.outcome {
+            case .rejected where deskMask?.mode != .full:
+                triggers.append("quad:rejected")
+            case .detected:
+                if detection.confidence < marginalConfidence { triggers.append("quad:marginal") }
+                for flag in detection.flags
+                where flag.hasPrefix("occluded:") || flag.hasPrefix("cornerFallback:") || flag == "lowContrastDesk" {
+                    triggers.append("quad:\(flag)")
+                }
+            default:
+                break
+            }
+        }
+        if let deskMask {
+            for flag in deskMask.flags
+            where flag.hasPrefix("capped:") || flag == "skipped:noSharpBoundary" || flag == "skipped:noPaper" {
+                triggers.append("mask:\(flag)")
+            }
+        }
+        guard !triggers.isEmpty else { return nil }
+        return MacroBorderContext(eligibleSides: sides, triggers: triggers)
+    }
+}

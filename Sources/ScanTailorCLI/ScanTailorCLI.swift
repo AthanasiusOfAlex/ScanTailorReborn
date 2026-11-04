@@ -80,6 +80,7 @@ public struct ScanTailorCLI {
         public var enableDewarp: Bool = true
         public var enablePerspectiveRectification: Bool = true
         public var enableDeskMasking: Bool = true
+        public var enableBorderFallback: Bool = true
         public var enableOCR: Bool = true
         public var ocrEngineType: OCREngineType? = nil
         public var ocrLanguages: [String] = ["en-US"]
@@ -134,6 +135,7 @@ public struct ScanTailorCLI {
         var enableDewarp = true
         var enablePerspective = true
         var enableDeskMask = true
+        var enableBorderFallback = true
         var enableOCR = true
         var ocrEngineType: OCREngineType? = nil
         var ocrLanguages: [String] = ["en-US"]
@@ -295,6 +297,9 @@ public struct ScanTailorCLI {
             case "--no-desk-mask":
                 enableDeskMask = false
                 i += 1
+            case "--no-border-fallback":
+                enableBorderFallback = false
+                i += 1
             case "--no-auto-prune", "--no-blank-pruning":
                 autoPruneBlankPages = false
                 i += 1
@@ -345,6 +350,7 @@ public struct ScanTailorCLI {
         opts.enableDewarp = enableDewarp
         opts.enablePerspectiveRectification = enablePerspective
         opts.enableDeskMasking = enableDeskMask
+        opts.enableBorderFallback = enableBorderFallback
         opts.enableOCR = enableOCR
         opts.ocrEngineType = ocrEngineType
         opts.ocrLanguages = ocrLanguages
@@ -446,7 +452,8 @@ public struct ScanTailorCLI {
             excludedPages: options.excludedPages,
             ocrLanguages: options.ocrLanguages,
             enablePerspectiveRectification: options.enablePerspectiveRectification,
-            enableDeskMasking: options.enableDeskMasking
+            enableDeskMasking: options.enableDeskMasking,
+            enableBorderFallback: options.enableBorderFallback
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -587,6 +594,13 @@ public struct ScanTailorCLI {
                 : 0
             lines.append("Desk Masking: \(masked) masked (mean \(String(format: "%.1f", meanMaskedPercent))%) | \(skipped) skipped | \(capped) capped")
         }
+        let fallbackRecords = manifest.pages.compactMap(\.borderFallback)
+        if !fallbackRecords.isEmpty {
+            let excised = fallbackRecords.filter(\.didExcise).count
+            let rejected = fallbackRecords.filter { !$0.didExcise && !$0.rejectedCandidates.isEmpty }.count
+            let idle = fallbackRecords.count - excised - rejected
+            lines.append("Border Fallback: \(excised) excised | \(idle) engaged, nothing found | \(rejected) rejected")
+        }
         if manifest.physicalScaleAmbiguous {
             lines.append("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true) — escalate to user for --page-size (octavo, trade-paperback, a5, a4, letter) or --input-dpi")
         }
@@ -661,6 +675,7 @@ public struct ScanTailorCLI {
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping
       --no-perspective             Disable document-quad detection and perspective rectification (alias --no-quad)
       --no-desk-mask               Disable residual desk/background masking before binarization
+      --no-border-fallback         Disable the macro-cluster border fallback on marginal-geometry pages
       --no-ocr                     Disable OCR searchable text layer
       --ocr-engine <engine>        OCR engine: apple (default on macOS), tesseract, dual
       --ocr-languages <langs>      Comma or plus-separated language codes, e.g. "grc+lat", "en-US,de-DE", "frk"

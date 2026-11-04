@@ -53,6 +53,9 @@ public struct BorderAndSpeckleCleaner: Sendable, Equatable {
         /// Neighbor connectivity used for connected-component extraction. Default is `.eight`.
         public var connectivity: Connectivity
 
+        /// Macro-cluster border fallback tuning (engaged only via ``clean(_:fallback:)``).
+        public var macroBorder: MacroBorderConfiguration
+
         public init(
             removeBorders: Bool = true,
             borderProximityMargin: Int = 16,
@@ -63,7 +66,8 @@ public struct BorderAndSpeckleCleaner: Sendable, Equatable {
             maxSpecklePixels: Int = 24,
             minDiacriticPixels: Int = 2,
             diacriticProtectionRadius: Int = 20,
-            connectivity: Connectivity = .eight
+            connectivity: Connectivity = .eight,
+            macroBorder: MacroBorderConfiguration = MacroBorderConfiguration()
         ) {
             self.removeBorders = removeBorders
             self.borderProximityMargin = max(1, borderProximityMargin)
@@ -75,6 +79,32 @@ public struct BorderAndSpeckleCleaner: Sendable, Equatable {
             self.minDiacriticPixels = max(1, minDiacriticPixels)
             self.diacriticProtectionRadius = max(0, diacriticProtectionRadius)
             self.connectivity = connectivity
+            self.macroBorder = macroBorder
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case removeBorders, borderProximityMargin, maxBorderStripThicknessRatio, minBorderSpanRatio
+            case minBorderEdgePixelThreshold, despeckle, maxSpecklePixels, minDiacriticPixels
+            case diacriticProtectionRadius, connectivity, macroBorder
+        }
+
+        /// Decodes a configuration; keys missing from older manifests fall back to defaults.
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = Configuration()
+            self.init(
+                removeBorders: try c.decodeIfPresent(Bool.self, forKey: .removeBorders) ?? d.removeBorders,
+                borderProximityMargin: try c.decodeIfPresent(Int.self, forKey: .borderProximityMargin) ?? d.borderProximityMargin,
+                maxBorderStripThicknessRatio: try c.decodeIfPresent(Double.self, forKey: .maxBorderStripThicknessRatio) ?? d.maxBorderStripThicknessRatio,
+                minBorderSpanRatio: try c.decodeIfPresent(Double.self, forKey: .minBorderSpanRatio) ?? d.minBorderSpanRatio,
+                minBorderEdgePixelThreshold: try c.decodeIfPresent(Int.self, forKey: .minBorderEdgePixelThreshold) ?? d.minBorderEdgePixelThreshold,
+                despeckle: try c.decodeIfPresent(Bool.self, forKey: .despeckle) ?? d.despeckle,
+                maxSpecklePixels: try c.decodeIfPresent(Int.self, forKey: .maxSpecklePixels) ?? d.maxSpecklePixels,
+                minDiacriticPixels: try c.decodeIfPresent(Int.self, forKey: .minDiacriticPixels) ?? d.minDiacriticPixels,
+                diacriticProtectionRadius: try c.decodeIfPresent(Int.self, forKey: .diacriticProtectionRadius) ?? d.diacriticProtectionRadius,
+                connectivity: try c.decodeIfPresent(Connectivity.self, forKey: .connectivity) ?? d.connectivity,
+                macroBorder: try c.decodeIfPresent(MacroBorderConfiguration.self, forKey: .macroBorder) ?? d.macroBorder
+            )
         }
     }
 
