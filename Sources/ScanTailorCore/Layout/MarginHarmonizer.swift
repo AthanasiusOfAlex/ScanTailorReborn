@@ -2,17 +2,18 @@ import ScanTailorContracts
 
 /// Book-wide statistical margin harmonizer and 3-tier page positioning engine.
 ///
-/// Establishes canonical Verso/Recto text frames across a multi-page book, runs Pass 2
-/// canonical-width outlier rejection to trim stray margin smudges, and positions each page
-/// according to the 3-tier policy:
-/// - **Tier 1 (`fullBody`)**: Locks full-body text pages to the canonical text frame so margins
-///   and running headers remain steady across page turns.
-/// - **Tier 2 (`edgeAnchoredPartial`)**: Anchors matching edges on partial pages (e.g. chapter
-///   openings with top sinkage or chapter endings with bottom whitespace) while preserving natural
-///   sinkage on the free edge.
-/// - **Tier 3 (`standaloneFloating`)**: Preserves the natural page-relative coordinates of
-///   standalone title pages, half-titles, chapter dividers, epigraphs, and ornaments rather than
-///   force-centering or pushing them to the top/bottom margin.
+/// Establishes the book's canonical text frame, runs Pass 2 canonical-width outlier rejection to trim
+/// stray margin smudges, and positions each page according to the 3-tier policy.
+///
+/// The frame is the largest clean body text block (header to footer, edge to edge); the canvas is that block
+/// plus the publication margins (by default 1/4 in top and bottom, 1/2 in left and right), not the
+/// scanned paper size. Every page is centered left to right:
+/// - **Tier 1 (`fullBody`)**: full text pages sit on the frame top, so running headers stay steady.
+/// - **Tier 2 (`edgeAnchoredPartial`)**: pages with a running header hang from the top however short;
+///   chapter openings that reach the foot of the text block sit on the frame bottom; other full-width
+///   blocks keep their natural height.
+/// - **Tier 3 (`standaloneFloating`)**: title pages, dedications, dividers and ornaments keep their
+///   offset from the scan's text block, and stay centered if they were centered.
 public struct MarginHarmonizer: Sendable {
     /// Logical book page side for recto/verso margin symmetry.
     public enum PageSide: String, Sendable, Equatable, Codable {
@@ -62,7 +63,7 @@ public struct MarginHarmonizer: Sendable {
         public var margins: PublicationMargins
         /// Optional explicit target output page trim size (`--page-size`), overriding automatic canvas sizing.
         public var targetPageSize: PhysicalSizeSpec?
-        /// Optional explicit canonical text block size (`--content-box-size`), overriding statistical 85th-percentile estimation.
+        /// Optional explicit canonical text block size (`--content-box-size`), overriding the largest-body-box estimate.
         public var targetContentBoxSize: PhysicalSizeSpec?
         /// Maximum fractional width deviation from `canonicalFrame.width` for a page to qualify as full-width (`Tier 1` or `Tier 2`).
         public var fullWidthToleranceFraction: Double
@@ -76,6 +77,9 @@ public struct MarginHarmonizer: Sendable {
         public var canonicalDimensionOutlierToleranceFraction: Double
         /// Interquartile range (IQR) multiplier for canonical frame outlier filtering (default: 1.5).
         public var canonicalDimensionIQROutlierMultiplier: Double
+        /// Relative spread of the size cluster that sets the canonical frame (default 0.02): the frame takes the
+        /// largest body box within the densest window of this width, so noisy boxes above it do not inflate it.
+        public var canonicalFrameClusterFraction: Double
 
         public init(
             margins: PublicationMargins = .publicationDefault,
@@ -88,7 +92,8 @@ public struct MarginHarmonizer: Sendable {
             minPartialHeightFraction: Double = 0.22,
             pass2OutlierWidthExcessFraction: Double = 0.10,
             canonicalDimensionOutlierToleranceFraction: Double = 0.25,
-            canonicalDimensionIQROutlierMultiplier: Double = 1.5
+            canonicalDimensionIQROutlierMultiplier: Double = 1.5,
+            canonicalFrameClusterFraction: Double = 0.02
         ) {
             var m = margins
             if let h = canonicalHorizontalMarginAt600DPI {
@@ -108,6 +113,7 @@ public struct MarginHarmonizer: Sendable {
             self.pass2OutlierWidthExcessFraction = min(max(0.02, pass2OutlierWidthExcessFraction), 0.50)
             self.canonicalDimensionOutlierToleranceFraction = min(max(0.05, canonicalDimensionOutlierToleranceFraction), 1.0)
             self.canonicalDimensionIQROutlierMultiplier = min(max(0.5, canonicalDimensionIQROutlierMultiplier), 5.0)
+            self.canonicalFrameClusterFraction = min(max(0.0, canonicalFrameClusterFraction), 0.5)
         }
     }
 
@@ -123,19 +129,38 @@ public struct MarginHarmonizer: Sendable {
         public let dpi: Int
         /// Pass 1 content box detection result.
         public let detection: ContentBoxDetector.DetectionResult
+        /// Whether the page carries a confirmed running header. Such a page always hangs from the frame top, even
+        /// when it holds only a few lines (`false` when header detection is off, and for inputs written before 7.1.1).
+        public let hasRunningHeader: Bool
 
         public init(
             pageIndex: Int,
             side: PageSide,
             pageSize: Size2I,
             dpi: Int = 600,
-            detection: ContentBoxDetector.DetectionResult
+            detection: ContentBoxDetector.DetectionResult,
+            hasRunningHeader: Bool = false
         ) {
             self.pageIndex = pageIndex
             self.side = side
             self.pageSize = pageSize
             self.dpi = dpi
             self.detection = detection
+            self.hasRunningHeader = hasRunningHeader
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case pageIndex, side, pageSize, dpi, detection, hasRunningHeader
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            pageIndex = try c.decode(Int.self, forKey: .pageIndex)
+            side = try c.decode(PageSide.self, forKey: .side)
+            pageSize = try c.decode(Size2I.self, forKey: .pageSize)
+            dpi = try c.decode(Int.self, forKey: .dpi)
+            detection = try c.decode(ContentBoxDetector.DetectionResult.self, forKey: .detection)
+            hasRunningHeader = try c.decodeIfPresent(Bool.self, forKey: .hasRunningHeader) ?? false
         }
     }
 
@@ -332,10 +357,10 @@ public struct MarginHarmonizer: Sendable {
             outlierTrimFlags.append(trimmed)
         }
 
-        // Step 3: Estimate canonical text width W_canon and height H_canon from the 85th percentile
-        // of refined body-candidate boxes (unless overridden via `targetContentBoxSize`), with IQR and
-        // median deviation outlier rejection to prevent standalone title pages or oversize foldouts from
-        // expanding the canonical text frame.
+        // Step 3: The canonical text block is the largest refined body box of the main size cluster (unless
+        // overridden via `targetContentBoxSize`), so the widest clean page touches the side margins and the tallest
+        // touches the top and bottom margins. IQR and median-deviation rejection keep title pages and foldouts out;
+        // the cluster keeps out boxes inflated by gutter shadows or scan-edge ink.
         let refinedBoxes = pages.indices
             .filter { !outlierSet.contains(pages[$0].pageIndex) }
             .compactMap { refinedDetections[$0].contentBox }
@@ -362,10 +387,10 @@ public struct MarginHarmonizer: Sendable {
         let fallbackBaseWidth = explicitCanvasSize?.width ?? medianPageWidth
         let fallbackBaseHeight = explicitCanvasSize?.height ?? medianPageHeight
         let rawCanonicalTextWidth = explicitContentBoxSize?.width
-            ?? Self.percentileInt(filteredWidths, p: 0.85)
+            ?? Self.largestInMainCluster(filteredWidths, windowFraction: configuration.canonicalFrameClusterFraction)
             ?? max(1, fallbackBaseWidth - minHMargin)
         let rawCanonicalTextHeight = explicitContentBoxSize?.height
-            ?? Self.percentileInt(filteredHeights, p: 0.85)
+            ?? Self.largestInMainCluster(filteredHeights, windowFraction: configuration.canonicalFrameClusterFraction)
             ?? max(1, fallbackBaseHeight - minVMargin)
 
         let canvasSize: Size2I
@@ -399,7 +424,8 @@ public struct MarginHarmonizer: Sendable {
                 leadingMargin: rectoMargins.left,
                 trailingMargin: rectoMargins.right
             )
-        } else if explicitContentBoxSize != nil {
+        } else {
+            // The canvas hugs the text block: the block plus the configured margins, whatever the scanned paper size.
             canonicalTextWidth = max(1, rawCanonicalTextWidth)
             canonicalTextHeight = max(1, rawCanonicalTextHeight)
             let neededVersoW = canonicalTextWidth + versoMargins.left + versoMargins.right
@@ -407,19 +433,6 @@ public struct MarginHarmonizer: Sendable {
             let canvasW = max(1, max(neededVersoW, neededRectoW))
             let canvasH = max(1, canonicalTextHeight + topMargin + bottomMargin)
             canvasSize = Size2I(width: canvasW, height: canvasH)
-            canonicalTopY = topMargin
-            versoLeftX = versoMargins.left
-            rectoLeftX = rectoMargins.left
-        } else {
-            canonicalTextWidth = max(1, rawCanonicalTextWidth)
-            canonicalTextHeight = max(1, rawCanonicalTextHeight)
-            // Determine uniform output canvas size:
-            // Large enough to accommodate the median physical page size and the canonical text block + configured margins.
-            let neededVersoW = canonicalTextWidth + versoMargins.left + versoMargins.right
-            let neededRectoW = canonicalTextWidth + rectoMargins.left + rectoMargins.right
-            let canvasWidth = max(medianPageWidth, max(neededVersoW, neededRectoW))
-            let canvasHeight = max(medianPageHeight, canonicalTextHeight + topMargin + bottomMargin)
-            canvasSize = Size2I(width: max(1, canvasWidth), height: max(1, canvasHeight))
             canonicalTopY = topMargin
             versoLeftX = versoMargins.left
             rectoLeftX = rectoMargins.left
@@ -438,17 +451,48 @@ public struct MarginHarmonizer: Sendable {
             height: canonicalTextHeight
         )
 
-        // Step 4: Classify each page into Tier 1, Tier 2, or Tier 3 and compute its target origin.
+        // Step 4: Where the text block sits on the scans, per side: the median edges of the full-size body boxes.
+        // Partial and floating pages are placed relative to it, so binding offsets and uneven crops do not move them.
+        func isFullSize(_ box: Rect2I) -> Bool {
+            abs(Double(box.width - canonicalTextWidth)) / Double(canonicalTextWidth) <= configuration.fullWidthToleranceFraction
+                && abs(Double(box.height - canonicalTextHeight)) / Double(canonicalTextHeight) <= configuration.fullHeightToleranceFraction
+        }
+        func medianFrame(_ boxes: [Rect2I]) -> Rect2I? {
+            guard let minX = Self.percentileInt(boxes.map(\.minX), p: 0.5),
+                  let minY = Self.percentileInt(boxes.map(\.minY), p: 0.5),
+                  let maxX = Self.percentileInt(boxes.map(\.maxX), p: 0.5),
+                  let maxY = Self.percentileInt(boxes.map(\.maxY), p: 0.5) else { return nil }
+            return Rect2I(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
+        }
+        var fullSizeBoxesBySide: [PageSide: [Rect2I]] = [:]
+        for (idx, page) in pages.enumerated() where !outlierSet.contains(page.pageIndex) {
+            if let box = refinedDetections[idx].contentBox, !box.isEmpty, isFullSize(box) {
+                fullSizeBoxesBySide[page.side, default: []].append(box)
+            }
+        }
+        let pooledSourceFrame = medianFrame(fullSizeBoxesBySide.values.flatMap { $0 })
+        let sourceFramesBySide = fullSizeBoxesBySide.compactMapValues { medianFrame($0) }
+        func sourceFrame(for page: PageInput) -> Rect2I {
+            if let frame = sourceFramesBySide[page.side] ?? pooledSourceFrame { return frame }
+            // No full-size body page at all: assume the text block is centered on the scan.
+            return Rect2I(
+                x: (page.pageSize.width - canonicalTextWidth) / 2,
+                y: (page.pageSize.height - canonicalTextHeight) / 2,
+                width: canonicalTextWidth,
+                height: canonicalTextHeight
+            )
+        }
+        let edgeAnchorTolerance = max(24, Int((Double(canonicalTextHeight) * 0.12).rounded()))
+        let centeredTolerance = max(referenceDPI * 3 / 10, canonicalTextWidth * 8 / 100)
+
+        // Step 5: Classify each page into Tier 1, Tier 2, or Tier 3 and compute its target origin. Every page is
+        // centered left to right in its frame, except a floating page whose text sits off to one side.
         var plans: [PageLayoutPlan] = []
         plans.reserveCapacity(pages.count)
 
         for (idx, page) in pages.enumerated() {
             let det = refinedDetections[idx]
             let targetFrame = (page.side == .verso) ? versoFrame : rectoFrame
-
-            // Physical-to-canvas reference offset (maps physical page center to canonical canvas center).
-            let physicalOffsetX = (canvasSize.width - page.pageSize.width) / 2
-            let physicalOffsetY = (canvasSize.height - page.pageSize.height) / 2
 
             guard let box = det.contentBox, !box.isEmpty else {
                 plans.append(
@@ -475,75 +519,65 @@ public struct MarginHarmonizer: Sendable {
 
             let isOutlier = outlierSet.contains(page.pageIndex)
             let forcedTier = forcedTiers[page.pageIndex]
+            let hasHeader = page.hasRunningHeader && !isOutlier
             let matchesCanonicalWidth = !isOutlier && widthRatioDiff <= configuration.fullWidthToleranceFraction
             let matchesCanonicalHeight = !isOutlier && heightRatioDiff <= configuration.fullHeightToleranceFraction
-            let placeAsFullBody = forcedTier.map { $0 == .fullBody } ?? (matchesCanonicalWidth && matchesCanonicalHeight)
-            let placeAsPartial = forcedTier.map { $0 == .edgeAnchoredPartial }
-                ?? (!isOutlier && matchesCanonicalWidth && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height)
+            let tier: PlacementTier = forcedTier ?? {
+                if matchesCanonicalWidth && matchesCanonicalHeight { return .fullBody }
+                // A page with a running header always hangs from the top, however little text it has.
+                if hasHeader { return .edgeAnchoredPartial }
+                if matchesCanonicalWidth && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height {
+                    return .edgeAnchoredPartial
+                }
+                return .standaloneFloating
+            }()
 
-            let tier: PlacementTier
+            let source = sourceFrame(for: page)
+            let centeredX = Self.clampOrigin(
+                targetFrame.minX + (targetFrame.width - box.width) / 2, span: box.width, canvasSpan: canvasSize.width
+            )
+            let topY = Self.clampOrigin(targetFrame.minY, span: box.height, canvasSpan: canvasSize.height)
+            let naturalY = Self.clampOrigin(
+                targetFrame.minY + (box.minY - source.minY), span: box.height, canvasSpan: canvasSize.height
+            )
             let destOrigin: Point2I
             var anchorEdge: VerticalAnchorEdge? = nil
 
-            if placeAsFullBody {
-                // Tier 1 — Full Body Page:
-                // Lock to the canonical text frame origin so left/right margins and running headers
-                // stay rock-steady across page turns.
-                tier = .fullBody
-                destOrigin = Point2I(
-                    x: Self.clampOrigin(targetFrame.minX, span: box.width, canvasSpan: canvasSize.width),
-                    y: Self.clampOrigin(targetFrame.minY, span: box.height, canvasSpan: canvasSize.height)
-                )
-            } else if placeAsPartial {
-                // Tier 2 — Edge-Anchored Partial Page (e.g. chapter start with top sinkage or chapter end):
-                // Compare how closely the physical top edge vs. physical bottom edge of `box` matches `targetFrame`.
-                let naturalTopY = box.minY + physicalOffsetY
-                let naturalBottomY = box.maxY + physicalOffsetY
-
-                let topDistToCanon = abs(naturalTopY - targetFrame.minY)
-                let bottomDistToCanon = abs(naturalBottomY - targetFrame.maxY)
-                let edgeAnchorTol = max(24, Int((Double(targetFrame.height) * 0.12).rounded()))
-
-                if bottomDistToCanon <= topDistToCanon && bottomDistToCanon <= edgeAnchorTol {
-                    // Chapter opening with top sinkage: anchor bottom edge to targetFrame.maxY
-                    // (preserving natural top sinkage!).
-                    tier = .edgeAnchoredPartial
-                    anchorEdge = .bottom
-                    let anchoredY = Self.clampOrigin(
-                        targetFrame.maxY - box.height,
-                        span: box.height,
-                        canvasSpan: canvasSize.height
-                    )
-                    destOrigin = Point2I(x: targetFrame.minX, y: anchoredY)
-                } else if topDistToCanon <= edgeAnchorTol {
-                    // Chapter ending with bottom whitespace: anchor top edge to targetFrame.minY.
-                    tier = .edgeAnchoredPartial
+            switch tier {
+            case .fullBody:
+                // Tier 1 — full body page: centered, top on the frame top, so headers stay put across page turns.
+                destOrigin = Point2I(x: centeredX, y: topY)
+            case .edgeAnchoredPartial:
+                // Tier 2 — partial page. A header page hangs from the top; otherwise a block that reaches the foot of
+                // the text block (a chapter opening) sits on the frame bottom, and one that starts at its head (a
+                // chapter ending) hangs from the top. Anything else keeps its natural height.
+                let topDistance = abs(box.minY - source.minY)
+                let bottomDistance = abs(box.maxY - source.maxY)
+                if hasHeader {
                     anchorEdge = .top
-                    destOrigin = Point2I(x: targetFrame.minX, y: targetFrame.minY)
+                    destOrigin = Point2I(x: centeredX, y: topY)
+                } else if bottomDistance <= topDistance && bottomDistance <= edgeAnchorTolerance {
+                    anchorEdge = .bottom
+                    let anchoredY = Self.clampOrigin(targetFrame.maxY - box.height, span: box.height, canvasSpan: canvasSize.height)
+                    destOrigin = Point2I(x: centeredX, y: anchoredY)
+                } else if topDistance <= edgeAnchorTolerance {
+                    anchorEdge = .top
+                    destOrigin = Point2I(x: centeredX, y: topY)
                 } else {
-                    // Full-width block floating vertically at a custom position: keep natural Y, lock X to canonical margin.
-                    tier = .edgeAnchoredPartial
                     anchorEdge = .natural
-                    let clampedY = Self.clampOrigin(naturalTopY, span: box.height, canvasSpan: canvasSize.height)
-                    destOrigin = Point2I(x: targetFrame.minX, y: clampedY)
+                    destOrigin = Point2I(x: centeredX, y: naturalY)
                 }
-            } else {
-                // Tier 3 — Standalone / Floating Page (title pages, half-titles, chapter dividers,
-                // epigraphs, dedications, colophons, ornaments):
-                // Preserve where the content naturally sits relative to the physical page reference frame,
-                // clamping only if needed to prevent clipping.
-                tier = .standaloneFloating
-                let naturalX = Self.clampOrigin(
-                    box.minX + physicalOffsetX,
-                    span: box.width,
-                    canvasSpan: canvasSize.width
-                )
-                let naturalY = Self.clampOrigin(
-                    box.minY + physicalOffsetY,
-                    span: box.height,
-                    canvasSpan: canvasSize.height
-                )
-                destOrigin = Point2I(x: naturalX, y: naturalY)
+            case .standaloneFloating:
+                // Tier 3 — title pages, dedications, dividers, ornaments: keep the offset from the scan's text block.
+                // Text centered on the scan stays centered; text off to one side keeps its offset from the center.
+                let offsetFromCenter = (box.minX + box.width / 2) - (source.minX + source.width / 2)
+                let x = abs(offsetFromCenter) <= centeredTolerance
+                    ? centeredX
+                    : Self.clampOrigin(
+                        targetFrame.minX + targetFrame.width / 2 + offsetFromCenter - box.width / 2,
+                        span: box.width, canvasSpan: canvasSize.width
+                    )
+                destOrigin = Point2I(x: x, y: naturalY)
             }
 
             plans.append(
@@ -642,6 +676,29 @@ public struct MarginHarmonizer: Sendable {
         }
 
         return filtered.isEmpty ? values : filtered
+    }
+
+    /// Returns the largest value of the densest cluster: the window `[v, v × (1 + windowFraction)]` holding the most
+    /// values (ties go to the larger window).
+    ///
+    /// Printed text blocks share one size, so full pages bunch together while boxes swollen by noise spread out
+    /// above them. When no two values share a window, the plain maximum is returned.
+    /// - Returns: `nil` for an empty input.
+    public static func largestInMainCluster(_ values: [Int], windowFraction: Double) -> Int? {
+        let sorted = values.sorted()
+        guard let maximum = sorted.last else { return nil }
+        var best: (count: Int, top: Int)? = nil
+        var end = 0
+        for (start, low) in sorted.enumerated() {
+            let limit = Double(low) * (1 + windowFraction)
+            end = max(end, start)
+            while end + 1 < sorted.count && Double(sorted[end + 1]) <= limit { end += 1 }
+            let candidate = (count: end - start + 1, top: sorted[end])
+            if let b = best, (candidate.count, candidate.top) < (b.count, b.top) { continue }
+            best = candidate
+        }
+        guard let best, best.count >= 2 else { return maximum }
+        return best.top
     }
 
     private static func percentileInt(_ values: [Int], p: Double) -> Int? {

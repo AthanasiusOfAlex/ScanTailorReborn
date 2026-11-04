@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-04  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 6 complete (Substeps 6.1.1–6.3.2). Next: **Phase 7, Substep 7.1.1 — Multi-Document Benchmark Validation** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 7) — *not yet started*
+**Current Active Milestone**: Phase 6 complete (Substeps 6.1.1–6.3.2). Next: **Phase 7, Substep 7.1.1 — Multi-Document Benchmark Validation** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 7) — *benchmark written (`Tests/ScanTailorAppleBackendTests/BenchmarkTests.swift`, opt-in via `SCANTAILOR_BENCHMARK=1`); known failures listed per book. 7.1.1a done (MarginHarmonizer: canvas = largest clean text block + 1/4 in top/bottom + 1/2 in sides; every page centered; header pages hang from the top, chapter openings sit on the bottom, floating pages keep their offset from the scan's text block; Flannery now passes every check). Still to fix: 7.1.1b (Simpson crop/split), 7.1.1c (Vermeersch: content boxes swallow gutter shadows and scan-edge ink, so they overflow the frame and header registration fails), 7.1.1d (`--cover-handling`)*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 

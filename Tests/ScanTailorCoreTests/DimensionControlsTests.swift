@@ -253,9 +253,10 @@ struct DimensionControlsTests {
         #expect(outInputDPI.manifest.inputDPI == 200)
         #expect(outInputDPI.manifest.fontScaleEstimate?.inferredSourceOpticalDPI == 200.0)
         #expect(abs((outInputDPI.manifest.fontScaleEstimate?.appliedScaleCorrectionFactor ?? 0.0) - (72.0 / 200.0)) < 1e-6)
-        // Output at 100 DPI should preserve >= 6.0" x 9.0" (600 x 900 px), NOT shrink to ~375 x 563 px!
-        #expect(outInputDPI.outputBitmapsAtOutputDPI[0].width >= 590)
-        #expect(outInputDPI.outputBitmapsAtOutputDPI[0].height >= 890)
+        // Output at 100 DPI keeps the 4.3" x 6.9" text block at full size plus margins (about 530 x 740 px),
+        // NOT shrunk by 200/320 to about 370 x 480 px!
+        #expect(outInputDPI.outputBitmapsAtOutputDPI[0].width >= 520)
+        #expect(outInputDPI.outputBitmapsAtOutputDPI[0].height >= 730)
 
         let summaryText = ScanTailorCLI.formatManifestSummary(outInputDPI.manifest)
         #expect(summaryText.contains("Dimension Overrides: inputDPI=200"))

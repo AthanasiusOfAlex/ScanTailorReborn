@@ -1583,13 +1583,14 @@ public struct BookPipelineCoordinator: Sendable {
         }
 
         // --- PASS 2: Book-Wide Outlier Rejection & 3-Tier Margin Harmonization ---
-        let harmonizerInputs = pass1Pages.map { p in
+        let harmonizerInputs = pass1Pages.enumerated().map { idx, p in
             MarginHarmonizer.PageInput(
                 pageIndex: p.outputPageIndex,
                 side: p.bookSide,
                 pageSize: Size2I(width: p.cleanedBitmap.width, height: p.cleanedBitmap.height),
                 dpi: configuration.processingDPI,
-                detection: p.detection
+                detection: p.detection,
+                hasRunningHeader: topAnchors[idx]?.kind == .runningHeader
             )
         }
 

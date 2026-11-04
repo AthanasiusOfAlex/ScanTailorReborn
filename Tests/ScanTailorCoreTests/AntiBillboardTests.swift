@@ -37,8 +37,10 @@ struct AntiBillboardTests {
 
         let outHeightInchesA = Double(outIllustration.outputBitmapsAtOutputDPI[0].height) / 75.0
         let outWidthInchesA = Double(outIllustration.outputBitmapsAtOutputDPI[0].width) / 75.0
-        #expect(outHeightInchesA >= 10.5 && outHeightInchesA <= 11.6)
-        #expect(outWidthInchesA >= 7.0 && outWidthInchesA <= 8.6)
+        // The scan is clamped to about 7.3" x 11"; the canvas hugs the plate (the middle 2/3 of the scan) plus
+        // 1/2" side and 1/4" top and bottom margins: about 5.9" x 7.8".
+        #expect(outHeightInchesA >= 7.6 && outHeightInchesA <= 8.1)
+        #expect(outWidthInchesA >= 5.6 && outWidthInchesA <= 6.2)
 
         let summaryText = ScanTailorCLI.formatManifestSummary(outIllustration.manifest)
         #expect(summaryText.contains("Physical Scale Status: AMBIGUOUS (physicalScaleAmbiguous=true)"))
@@ -59,7 +61,7 @@ struct AntiBillboardTests {
         let estB = try #require(outCover.manifest.fontScaleEstimate)
         #expect(estB.wasAntiBillboardClamped == true)
         let coverHeightInches = Double(outCover.outputBitmapsAtOutputDPI[0].height) / 75.0
-        #expect(coverHeightInches >= 10.5 && coverHeightInches <= 11.6)
+        #expect(coverHeightInches >= 7.6 && coverHeightInches <= 8.1)
     }
 
     @Test("Calibrated standard and Legal illustration pages remain at exact 1.0x physical scale with physicalScaleAmbiguous == false")
@@ -82,9 +84,11 @@ struct AntiBillboardTests {
             ocrEngine: nil
         )
         #expect(outOctavo.manifest.physicalScaleAmbiguous == false)
-        #expect(outOctavo.manifest.canonicalCanvasSizeAtProcessingDPI == Size2I(width: 900, height: 1350))
-        #expect(outOctavo.outputBitmapsAtOutputDPI[0].width == 450)
-        #expect(outOctavo.outputBitmapsAtOutputDPI[0].height == 675)
+        // Unscaled: the 600 x 900 px plate plus 1/2" (75 px) side and 1/4" (38 px) top and bottom margins.
+        #expect(outOctavo.manifest.pages[0].layoutPlan.sourceContentBox?.size == Size2I(width: 600, height: 900))
+        #expect(outOctavo.manifest.canonicalCanvasSizeAtProcessingDPI == Size2I(width: 750, height: 976))
+        #expect(outOctavo.outputBitmapsAtOutputDPI[0].width == 375)
+        #expect(outOctavo.outputBitmapsAtOutputDPI[0].height == 488)
 
         // 2. Calibrated 8.5" x 14.0" US Legal illustration scan (1275 x 2100 px at 150 DPI, right on the 14.0" boundary)
         let legalIllustration = makeIllustrationBuffer(width: 1275, height: 2100, declaredDPI: 150)
@@ -95,8 +99,9 @@ struct AntiBillboardTests {
             ocrEngine: nil
         )
         #expect(outLegal.manifest.physicalScaleAmbiguous == false)
-        #expect(outLegal.manifest.canonicalCanvasSizeAtProcessingDPI == Size2I(width: 1275, height: 2100))
-        #expect(outLegal.outputBitmapsAtOutputDPI[0].height == 1050) // 14.0" at 75 DPI
+        #expect(outLegal.manifest.pages[0].layoutPlan.sourceContentBox?.size == Size2I(width: 851, height: 1400))
+        #expect(outLegal.manifest.canonicalCanvasSizeAtProcessingDPI == Size2I(width: 1001, height: 1476))
+        #expect(outLegal.outputBitmapsAtOutputDPI[0].height == 738) // the 9.33" plate plus margins, at 75 DPI
     }
 
     @Test("Anti-billboard clamping prevents >14-inch PDF pages even when automatic font-scale calibration is disabled or margins inflate canvas")
@@ -186,7 +191,11 @@ struct AntiBillboardTests {
             existingManifest: skewEditedManifest
         )
         #expect(rerunStillAmbiguous.manifest.physicalScaleAmbiguous == true)
-        #expect(rerunStillAmbiguous.manifest.canonicalCanvasSizeAtProcessingDPI == initialOut.manifest.canonicalCanvasSizeAtProcessingDPI)
+        // Same scale; the canvas follows the (slightly re-skewed) plate, so allow a few pixels.
+        #expect(rerunStillAmbiguous.manifest.fontScaleEstimate?.appliedScaleCorrectionFactor == initialOut.manifest.fontScaleEstimate?.appliedScaleCorrectionFactor)
+        let rerunCanvas = rerunStillAmbiguous.manifest.canonicalCanvasSizeAtProcessingDPI
+        let initialCanvas = initialOut.manifest.canonicalCanvasSizeAtProcessingDPI
+        #expect(abs(rerunCanvas.width - initialCanvas.width) <= 8 && abs(rerunCanvas.height - initialCanvas.height) <= 8)
 
         // 4. Agent escalates to user; user selects large-format `folio` (`12" x 15"`, height 15" > 14") in manifest:
         //    Explicit `pageSize` override clears `physicalScaleAmbiguous == false` and honors exact 12" x 15" without clamping!

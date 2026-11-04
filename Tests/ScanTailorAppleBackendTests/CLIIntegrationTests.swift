@@ -163,7 +163,7 @@ struct CLIIntegrationTests {
         #expect(scaleEstimate.estimatedBodyPointSize >= 9.0 && scaleEstimate.estimatedBodyPointSize <= 11.2)
         #expect(scaleEstimate.declaredBodyPointSizeBeforeRescale >= 36.0 && scaleEstimate.declaredBodyPointSizeBeforeRescale <= 48.0)
 
-        // 3. Verify output PDF pages have genuine book dimensions (~5.0"–6.5" x ~7.0"–8.5"), NOT 22" x 33" billboards
+        // 3. Verify output PDF pages have genuine book dimensions (the ~3.8" x 5.7" text block plus margins), NOT 22" x 33" billboards
         let outDoc = try #require(PDFDocument(url: outputPDFURL))
         #expect(outDoc.pageCount == 2)
         for pageIdx in 0..<outDoc.pageCount {
@@ -171,8 +171,8 @@ struct CLIIntegrationTests {
             let mediaBounds = pdfPage.bounds(for: .mediaBox)
             let widthInches = Double(mediaBounds.width) / 72.0
             let heightInches = Double(mediaBounds.height) / 72.0
-            #expect(widthInches >= 5.0 && widthInches <= 6.5)
-            #expect(heightInches >= 7.0 && heightInches <= 8.5)
+            #expect(widthInches >= 4.6 && widthInches <= 5.1)
+            #expect(heightInches >= 5.9 && heightInches <= 6.4)
         }
 
         // 4. Verify JSON manifest round-trip and deterministic override re-run reuse appliedScaleCorrectionFactor
@@ -288,7 +288,7 @@ struct CLIIntegrationTests {
         let reader = try ApplePDFSourceReader(url: inputPDFURL)
         let accelerator = MetalComputeAccelerator()
 
-        // 1. Automatic run without overrides: must clamp PDF MediaBox to ~7.33" x 11.0" (<= 14.0") and set `physicalScaleAmbiguous = true`
+        // 1. Automatic run without overrides: must clamp the scan to ~7.33" x 11.0" (<= 14.0"), hug its plate, and set `physicalScaleAmbiguous = true`
         let autoWriter = try ApplePDFDocumentWriter(destinationURL: autoClampedPDFURL)
         let autoConfig = BookPipelineCoordinator.Configuration(
             processingDPI: 200,
@@ -312,8 +312,9 @@ struct CLIIntegrationTests {
         let autoBounds = try #require(autoDoc.page(at: 0)).bounds(for: .mediaBox)
         let autoWInches = Double(autoBounds.width) / 72.0
         let autoHInches = Double(autoBounds.height) / 72.0
-        #expect(autoWInches >= 7.0 && autoWInches <= 8.6)
-        #expect(autoHInches >= 10.5 && autoHInches <= 11.6)
+        // The scan is clamped to about 7.3" x 11"; the canvas hugs its plate plus margins.
+        #expect(autoWInches >= 6.0 && autoWInches <= 6.5)
+        #expect(autoHInches >= 8.4 && autoHInches <= 8.9)
 
         // 2. Explicit `--page-size folio` (12.0" x 15.0" = 864 x 1080 pt) honors > 14" user request and clears `physicalScaleAmbiguous`
         let folioWriter = try ApplePDFDocumentWriter(destinationURL: folioPDFURL)

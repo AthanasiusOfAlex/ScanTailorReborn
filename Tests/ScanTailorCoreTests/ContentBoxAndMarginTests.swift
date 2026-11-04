@@ -199,13 +199,13 @@ struct ContentBoxAndMarginTests {
         #expect(plan3.destinationOrigin.y == model.versoCanonicalFrame.minY + 360)
 
         // Verify Tier 3 (standaloneFloating) on page 4 (divider / epigraph):
-        // Its natural page-relative position must be preserved rather than pushed to the top or left margin!
+        // It keeps its offset from the scan's text block (here centered, 500 px below the block top) rather than
+        // being pushed to the top margin.
         let plan4 = model.pagePlans[4]
         #expect(plan4.tier == .standaloneFloating)
-        let physicalOffsetX = (model.canvasSize.width - pageSize.width) / 2
-        let physicalOffsetY = (model.canvasSize.height - pageSize.height) / 2
-        #expect(plan4.destinationOrigin.x == standaloneRect.minX + physicalOffsetX)
-        #expect(plan4.destinationOrigin.y == standaloneRect.minY + physicalOffsetY)
+        let frame = model.rectoCanonicalFrame
+        #expect(plan4.destinationOrigin.x == frame.minX + (frame.width - standaloneRect.width) / 2)
+        #expect(plan4.destinationOrigin.y == frame.minY + (standaloneRect.minY - canonicalBodyRect.minY))
     }
 
     @Test("BookPipelineCoordinator runs 3-pass pipeline on multi-page scans and supports manifest overrides")

@@ -376,9 +376,9 @@ struct FontScaleAnalyzerTests {
         #expect(abs(est72.inferredSourceOpticalDPI - 300.0) <= 20.0)
         #expect(abs(est150.inferredSourceOpticalDPI - 300.0) <= 20.0)
 
-        // Both must converge to the identical ~6.0" x 9.0" physical page size!
-        #expect(est72.estimatedSinglePageSizeInches.width >= 5.5 && est72.estimatedSinglePageSizeInches.width <= 6.5)
-        #expect(est72.estimatedSinglePageSizeInches.height >= 8.3 && est72.estimatedSinglePageSizeInches.height <= 9.7)
+        // Both must converge to the identical page: the ~4.5" x 7.9" text block of the 6" x 9" page plus margins.
+        #expect(est72.estimatedSinglePageSizeInches.width >= 5.2 && est72.estimatedSinglePageSizeInches.width <= 5.8)
+        #expect(est72.estimatedSinglePageSizeInches.height >= 8.1 && est72.estimatedSinglePageSizeInches.height <= 8.7)
         #expect(abs(est72.estimatedSinglePageSizeInches.width - est150.estimatedSinglePageSizeInches.width) <= 0.15)
         #expect(abs(est72.estimatedSinglePageSizeInches.height - est150.estimatedSinglePageSizeInches.height) <= 0.15)
 
