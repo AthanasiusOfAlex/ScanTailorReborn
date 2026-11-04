@@ -14,6 +14,16 @@ public protocol OCREngine: Sendable {
         dpi: Int,
         languages: [String]
     ) async throws(OCRError) -> [RecognizedTextObservation]
+
+    /// A stable description of everything that changes the recognized text (engine, version, settings), used to
+    /// key cached results. Two engines with the same identity must return the same text for the same image.
+    var cacheIdentity: String { get }
+}
+
+extension OCREngine {
+    /// The engine's type and stored settings (`String(reflecting:)`). Engines whose settings include unordered
+    /// collections, or whose output depends on the system, provide their own.
+    public var cacheIdentity: String { String(reflecting: self) }
 }
 
 /// Available OCR engine implementations.

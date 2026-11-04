@@ -140,9 +140,30 @@ struct AdjustmentResolver: Sendable {
     }
 
     /// The cut position of a spread of `width` pixels from a ``ScanAdjustment/splitX``, clamped inside the scan.
-    func splitCenter(for adjustment: ScanAdjustment, width: Int) -> Double? {
-        guard let x = adjustment.splitX else { return nil }
-        let px = Double(x.pixels(atDPI: processingDPI, extent: width))
+    static func splitCenter(_ x: AdjustmentLength, width: Int, dpi: Int) -> Double {
+        let px = Double(x.pixels(atDPI: dpi, extent: width))
         return min(max(px, Double(width) * 0.05), Double(width) * 0.95)
+    }
+
+    /// The override built from the scan-based entries alone (`s12`, `s12L`), without recording them as applied.
+    ///
+    /// Pass 1 runs scans in parallel before the output page numbers are known; this is the best guess of a
+    /// page's pixel-changing edits at that point. Entries by page number, and a stored manifest's overrides,
+    /// are matched later, and a page whose final edits differ is processed again.
+    func scanBasedOverride(scanIndex: Int, side: PageSide) -> PageManualOverride? {
+        guard isActive, scanIndex < scanNumbers.count else { return nil }
+        let scan = scanNumbers[scanIndex]
+        var keys: [PageReference] = [.scan(scan, .whole)]
+        switch side {
+        case .leftVerso: keys.append(.scan(scan, .left))
+        case .rightRecto: keys.append(.scan(scan, .right))
+        case .single: break
+        }
+        var merged: PageAdjustment? = nil
+        for key in keys {
+            guard let adj = adjustments.pages[key] else { continue }
+            merged = merged.map { $0.merged(with: adj) } ?? adj
+        }
+        return merged.map(makeOverride(from:))
     }
 }

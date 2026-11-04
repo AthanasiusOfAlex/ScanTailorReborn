@@ -272,6 +272,9 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
     /// ``PageProcessingRecord/sourcePageIndex`` (empty for manifests written before Substep 6.3.1, where the
     /// scan number is `sourcePageIndex + 1`).
     public var sourceScanNumbers: [Int]
+    /// How the run went: parallel jobs, cache reuse and timings (`nil` for manifests written before Substep 6.3.2).
+    /// It changes from run to run, so leave it out when comparing results.
+    public var run: PipelineRunReport?
 
     /// Scan number of the scan a page came from.
     public func scanNumber(of record: PageProcessingRecord) -> Int {
@@ -359,6 +362,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         case dimensionConsensus
         case adjustments
         case sourceScanNumbers
+        case run
     }
 
     public init(from decoder: Decoder) throws {
@@ -384,6 +388,7 @@ public struct BookProcessingManifest: Sendable, Equatable, Codable {
         self.dimensionConsensus = try container.decodeIfPresent(DimensionConsensusSummary.self, forKey: .dimensionConsensus)
         self.adjustments = try container.decodeIfPresent(AdjustmentReport.self, forKey: .adjustments)
         self.sourceScanNumbers = try container.decodeIfPresent([Int].self, forKey: .sourceScanNumbers) ?? []
+        self.run = try container.decodeIfPresent(PipelineRunReport.self, forKey: .run)
     }
 }
 
@@ -493,6 +498,11 @@ public struct BookPipelineCoordinator: Sendable {
         public var manualOutlierReferences: [PageReference]
         /// Stops after the layout is decided (`--stop-after layout`): no pixels are rendered, recognized, or written.
         public var stopAfter: PipelineStop?
+        /// Scans (pass 1) and pages (pass 3) processed at the same time (`--jobs`, Substep 6.3.2). The result does
+        /// not depend on it; memory grows with it, by about one scan's working set per job.
+        public var jobs: Int
+        /// Reuse of earlier results (`--cache-dir`, Substep 6.3.2); `nil` computes everything.
+        public var cache: PipelineCacheOptions?
 
         public init(
             processingDPI: Int = 600,
@@ -534,8 +544,12 @@ public struct BookPipelineCoordinator: Sendable {
             isolateOutlierCanvases: Bool = true,
             adjustments: PageAdjustments = .empty,
             manualOutlierReferences: [PageReference] = [],
-            stopAfter: PipelineStop? = nil
+            stopAfter: PipelineStop? = nil,
+            jobs: Int = 1,
+            cache: PipelineCacheOptions? = nil
         ) {
+            self.jobs = max(1, jobs)
+            self.cache = cache
             self.adjustments = adjustments
             self.manualOutlierReferences = manualOutlierReferences
             self.stopAfter = stopAfter
@@ -897,35 +911,54 @@ public struct BookPipelineCoordinator: Sendable {
             }
         }
 
-        var sourceGrayPages: [GrayscaleBuffer] = []
-        sourceGrayPages.reserveCapacity(activeSourceIndices.count)
-
+        // Scans are loaded one at a time by the pass-1 jobs; their sizes come from the page boxes, exactly as the
+        // reader computes them, so the landscape split veto needs no raster.
+        var rasterSizes: [Size2I] = []
+        rasterSizes.reserveCapacity(activeSourceIndices.count)
+        let renderScale = Double(effectiveRenderDPI) / 72.0
         for srcIdx in activeSourceIndices {
+            let box: Rect2D
             do {
-                let rawGray = try await reader.rasterizePage(at: srcIdx, targetDPI: effectiveRenderDPI)
-                let stampedGray = (rawGray.dpi == configuration.processingDPI)
-                    ? rawGray
-                    : GrayscaleBuffer(
-                        width: rawGray.width,
-                        height: rawGray.height,
-                        dpi: configuration.processingDPI,
-                        pixels: rawGray.pixels
-                    )
-                sourceGrayPages.append(stampedGray)
+                box = try reader.pageBoxPoints(at: srcIdx)
             } catch {
                 throw .pdfReadFailed(error)
             }
-            progressHandler?(srcIdx + 1, sourceCount)
+            rasterSizes.append(Size2I(
+                width: max(1, Int((box.width * renderScale).rounded())),
+                height: max(1, Int((box.height * renderScale).rounded()))
+            ))
         }
 
-        return try await processGrayscalePagesImpl(
-            sourceGrayPages,
+        let renderDPI = effectiveRenderDPI
+        let processingDPI = configuration.processingDPI
+        let indices = activeSourceIndices
+        let sourceFingerprint = configuration.cache?.sourceFingerprint
+        let source = ScanSource(
+            count: indices.count,
+            sizes: rasterSizes,
+            load: { (i: Int) async throws(PipelineError) -> GrayscaleBuffer in
+                let raw: GrayscaleBuffer
+                do throws(PDFReadError) {
+                    raw = try await reader.rasterizePage(at: indices[i], targetDPI: renderDPI)
+                } catch {
+                    throw .pdfReadFailed(error)
+                }
+                return raw.dpi == processingDPI
+                    ? raw
+                    : GrayscaleBuffer(width: raw.width, height: raw.height, dpi: processingDPI, pixels: raw.pixels)
+            },
+            identity: { i in sourceFingerprint.map { "pdf:\($0)#\(indices[i])@\(renderDPI)" } }
+        )
+
+        return try await processScans(
+            source,
             writer: writer,
             accelerator: accelerator,
             ocrEngine: ocrEngine,
             existingManifest: existingManifest,
-            preScaleDecisionFromReader: readerPreScaleDecision,
-            scanNumbers: activeSourceIndices.map { $0 + 1 }
+            preScaleDecision: readerPreScaleDecision,
+            scanNumbers: indices.map { $0 + 1 },
+            progress: progressHandler
         )
     }
 
@@ -956,44 +989,52 @@ public struct BookPipelineCoordinator: Sendable {
         ocrEngine: (any OCREngine)? = nil,
         existingManifest: BookProcessingManifest? = nil
     ) async throws(PipelineError) -> PipelineOutput {
-        try await processGrayscalePagesImpl(
-            sourcePages,
+        let (pages, decision) = prepareDirectPages(sourcePages, accelerator: accelerator, existingManifest: existingManifest)
+        let hashPixels = configuration.cache != nil
+        let source = ScanSource(
+            count: pages.count,
+            sizes: pages.map { Size2I(width: $0.width, height: $0.height) },
+            load: { (i: Int) async throws(PipelineError) -> GrayscaleBuffer in pages[i] },
+            identity: { i in
+                guard hashPixels else { return nil }
+                var hasher = KeyHasher()
+                hasher.add(pages[i])
+                return "pixels:\(hasher.hex)"
+            }
+        )
+        return try await processScans(
+            source,
             writer: writer,
             accelerator: accelerator,
             ocrEngine: ocrEngine,
             existingManifest: existingManifest,
-            preScaleDecisionFromReader: nil,
-            scanNumbers: sourcePages.indices.map { $0 + 1 }
+            preScaleDecision: decision,
+            scanNumbers: pages.indices.map { $0 + 1 },
+            progress: nil
         )
     }
 
-    private func processGrayscalePagesImpl<Writer: PDFDocumentWriter & ~Copyable>(
+    /// Detects and resamples oversized direct `GrayscaleBuffer` inputs (the reader path decides this before rasterizing).
+    /// - Returns: The pages to process and the scale decision (`nil` when no rule applied).
+    private func prepareDirectPages(
         _ rawSourcePages: [GrayscaleBuffer],
-        writer: consuming Writer,
         accelerator: any ComputeAccelerator,
-        ocrEngine: (any OCREngine)?,
-        existingManifest: BookProcessingManifest?,
-        preScaleDecisionFromReader: FontScaleAnalyzer.PreRasterScaleDecision?,
-        scanNumbers: [Int]
-    ) async throws(PipelineError) -> PipelineOutput {
+        existingManifest: BookProcessingManifest?
+    ) -> (pages: [GrayscaleBuffer], decision: FontScaleAnalyzer.PreRasterScaleDecision?) {
         let effectiveInputDPI = configuration.inputDPI ?? existingManifest?.inputDPI
         let effectivePageSize = configuration.targetPageSize ?? existingManifest?.pageSize
         let effectiveContentBoxSize = configuration.targetContentBoxSize ?? existingManifest?.contentBoxSize
-
         var effectiveHarmonizerConfig = configuration.harmonizerConfiguration
         effectiveHarmonizerConfig.targetPageSize = effectivePageSize
         effectiveHarmonizerConfig.targetContentBoxSize = effectiveContentBoxSize
-
         let binarizer = AdaptiveBinarizer(configuration: configuration.binarizerConfiguration)
         let cleaner = BorderAndSpeckleCleaner(configuration: configuration.cleanerConfiguration)
-        let tracer = TextLineTracer()
-        let dewarpSolver = CylindricalDewarpSolver()
         let contentDetector = ContentBoxDetector(configuration: configuration.contentDetectorConfiguration)
-        let harmonizer = MarginHarmonizer(configuration: effectiveHarmonizerConfig)
         let fontScaleAnalyzer = FontScaleAnalyzer(configuration: configuration.fontScaleConfiguration)
 
         var sourcePages = rawSourcePages
-        var effectivePreScaleDecision = preScaleDecisionFromReader
+        var effectivePreScaleDecision: FontScaleAnalyzer.PreRasterScaleDecision? = nil
+
 
         // Detect and resample direct `GrayscaleBuffer` inputs when not already handled by `processBook(reader:...)`.
         if effectivePreScaleDecision == nil && !sourcePages.isEmpty {
@@ -1230,6 +1271,36 @@ public struct BookPipelineCoordinator: Sendable {
                 }
             }
         }
+        return (sourcePages, effectivePreScaleDecision)
+    }
+
+    /// Runs the three passes on scans from `source`.
+    private func processScans<Writer: PDFDocumentWriter & ~Copyable>(
+        _ source: ScanSource,
+        writer: consuming Writer,
+        accelerator: any ComputeAccelerator,
+        ocrEngine: (any OCREngine)?,
+        existingManifest: BookProcessingManifest?,
+        preScaleDecision effectivePreScaleDecision: FontScaleAnalyzer.PreRasterScaleDecision?,
+        scanNumbers: [Int],
+        progress: (@Sendable (_ completedScans: Int, _ totalScans: Int) -> Void)?
+    ) async throws(PipelineError) -> PipelineOutput {
+        let runStart = ContinuousClock.now
+        let effectiveInputDPI = configuration.inputDPI ?? existingManifest?.inputDPI
+        let effectivePageSize = configuration.targetPageSize ?? existingManifest?.pageSize
+        let effectiveContentBoxSize = configuration.targetContentBoxSize ?? existingManifest?.contentBoxSize
+
+        var effectiveHarmonizerConfig = configuration.harmonizerConfiguration
+        effectiveHarmonizerConfig.targetPageSize = effectivePageSize
+        effectiveHarmonizerConfig.targetContentBoxSize = effectiveContentBoxSize
+
+        let binarizer = AdaptiveBinarizer(configuration: configuration.binarizerConfiguration)
+        let cleaner = BorderAndSpeckleCleaner(configuration: configuration.cleanerConfiguration)
+        let tracer = TextLineTracer()
+        let dewarpSolver = CylindricalDewarpSolver()
+        let contentDetector = ContentBoxDetector(configuration: configuration.contentDetectorConfiguration)
+        let harmonizer = MarginHarmonizer(configuration: effectiveHarmonizerConfig)
+        let fontScaleAnalyzer = FontScaleAnalyzer(configuration: configuration.fontScaleConfiguration)
 
         // Build lookup table of manual overrides by outputPageIndex if an existing manifest was supplied.
         var overridesByOutputIndex: [Int: PageManualOverride] = [:]
@@ -1242,25 +1313,38 @@ public struct BookPipelineCoordinator: Sendable {
         }
 
         // --- PASS 1: Perspective Rectification, Desk Masking, Page Split, Deskew, 3D Cubic-Sheet Dewarp, 600 DPI Binarization & Content Box Detection ---
-        var sourceSplits: [PageSplitDecision] = []
-        sourceSplits.reserveCapacity(sourcePages.count)
-        var pass1Pages: [Pass1Page] = []
-        var prunedPages: [PrunedPageRecord] = []
-        var sourceGeometry: [SourcePageGeometryRecord] = []
-        sourceGeometry.reserveCapacity(sourcePages.count)
+        // Scans run in parallel (at most `jobs` at a time), each loaded only when its job starts, and reuse cached
+        // results when the cache has them. Output page numbers depend on which earlier pages were dropped or
+        // pruned, so they are assigned afterwards, in scan order: the result is the same as one scan at a time.
+        let pass1Start = ContinuousClock.now
         var priorGeometryBySourceIndex: [Int: SourcePageGeometryRecord] = [:]
         for record in existingManifest?.sourcePageGeometry ?? [] {
             priorGeometryBySourceIndex[record.sourcePageIndex] = record
         }
 
         let dpiScale = Double(configuration.processingDPI) / 600.0
-        let minSagPixels = configuration.minDewarpSagPixelsAt600DPI * dpiScale
-        let effectiveGutterTrimWidth = max(0, Int((Double(configuration.gutterTrimWidth) * dpiScale).rounded()))
+        let jobCount = max(1, configuration.jobs)
+        let cache = PipelineCache(configuration.cache)
+        let context = Pass1Context(
+            binarizer: binarizer,
+            cleaner: cleaner,
+            tracer: tracer,
+            dewarpSolver: dewarpSolver,
+            contentDetector: contentDetector,
+            fontScaleAnalyzer: fontScaleAnalyzer,
+            accelerator: accelerator,
+            ocrEngine: ocrEngine,
+            cache: cache,
+            fingerprint: cache == nil ? "" : pass1Fingerprint(effectivePageSize: effectivePageSize, accelerator: accelerator, ocrEngine: ocrEngine),
+            effectivePageSize: effectivePageSize,
+            minSagPixels: configuration.minDewarpSagPixelsAt600DPI * dpiScale,
+            gutterTrimWidth: max(0, Int((Double(configuration.gutterTrimWidth) * dpiScale).rounded()))
+        )
 
         // Landscape scans in a portrait book are plates or tables, not two-page spreads (Substep 6.2.1).
         let dimensionConsensus = DimensionConsensus(configuration: configuration.dimensionConsensusConfiguration)
         let splitVetoedSources: Set<Int> = configuration.splitMode == .automatic
-            ? Set(dimensionConsensus.splitVetoes(sourceSizes: sourcePages.map { Size2I(width: $0.width, height: $0.height) }))
+            ? Set(dimensionConsensus.splitVetoes(sourceSizes: source.sizes))
             : []
 
         var resolver = AdjustmentResolver(
@@ -1268,15 +1352,18 @@ public struct BookPipelineCoordinator: Sendable {
             scanNumbers: scanNumbers,
             processingDPI: configuration.processingDPI
         )
-        var splitScanNumbers: Set<Int> = []
 
-        for (srcIdx, unrectifiedScan) in sourcePages.enumerated() {
+        // What each scan job is asked to do. Page edits are matched by scan reference only (`s12`, `s12L`); edits by
+        // page number are matched below, once the numbers are known.
+        var jobs: [ScanJob] = []
+        jobs.reserveCapacity(source.count)
+        for srcIdx in 0..<source.count {
             let scanAdjustment = resolver.scanAdjustment(forScanAt: srcIdx)
             var priorGeometry = priorGeometryBySourceIndex[srcIdx]
             if let scanAdjustment, scanAdjustment.disableRectification != nil || scanAdjustment.disableDeskMask != nil {
                 var record = priorGeometry ?? SourcePageGeometryRecord(
                     sourcePageIndex: srcIdx,
-                    rasterSize: Size2I(width: unrectifiedScan.width, height: unrectifiedScan.height),
+                    rasterSize: source.sizes[srcIdx],
                     detection: nil,
                     rectified: false,
                     plan: nil
@@ -1287,47 +1374,45 @@ public struct BookPipelineCoordinator: Sendable {
                 record.manualOverride = geometryOverride
                 priorGeometry = record
             }
-
-            // 0a. Document quadrangle detection & perspective rectification (desk excision).
-            let (rectifiedScan, rectificationRecord) = rectifySourcePage(
-                unrectifiedScan,
-                sourcePageIndex: srcIdx,
-                priorRecord: priorGeometry,
-                targetPageSize: effectivePageSize
-            )
-            // 0b. Residual desk/background masking (gutter wedges, crop-edge slivers, or the full
-            // desk when rectification was skipped, rejected, or disabled).
-            let (rawScan, geometryRecord) = maskDeskOfSourcePage(rectifiedScan, record: rectificationRecord)
-            sourceGeometry.append(geometryRecord)
-
-            let splitDecision: PageSplitDecision
-            if let scanAdjustment, let centerX = resolver.splitCenter(for: scanAdjustment, width: rawScan.width) {
-                // An exact cut from the adjustments file: a straight vertical line at the requested position.
-                splitDecision = PageSplitDecision(
-                    layoutType: .twoPageSpread,
-                    splitLine: GutterSplitLine(centerX: centerX, normalizedCenterX: centerX / Double(max(1, rawScan.width))),
-                    confidence: 1.0
-                )
+            let splitMode: PageSplitMode
+            if let forced = scanAdjustment?.split, forced != .automatic {
+                splitMode = forced
             } else {
-                let mode: PageSplitMode
-                if let forced = scanAdjustment?.split, forced != .automatic {
-                    mode = forced
-                } else {
-                    mode = splitVetoedSources.contains(srcIdx) ? .singlePage : configuration.splitMode
-                }
-                splitDecision = PageSplitEstimator.estimateSplit(in: rawScan, mode: mode)
+                splitMode = splitVetoedSources.contains(srcIdx) ? .singlePage : configuration.splitMode
             }
-            sourceSplits.append(splitDecision)
-            let slices = PageSplitEstimator.split(
-                rawScan,
-                using: splitDecision,
-                gutterTrimWidth: effectiveGutterTrimWidth
-            )
+            var edits: [PageSide: HeavyPageEdits] = [:]
+            for side in [PageSide.single, .leftVerso, .rightRecto] {
+                edits[side] = HeavyPageEdits(resolver.scanBasedOverride(scanIndex: srcIdx, side: side))
+            }
+            jobs.append(ScanJob(
+                index: srcIdx,
+                priorGeometry: priorGeometry,
+                splitMode: splitMode,
+                splitX: scanAdjustment?.splitX,
+                edits: edits
+            ))
+        }
 
-            if slices.count > 1 { splitScanNumbers.insert(scanNumbers[srcIdx]) }
-            for slice in slices {
-                let outIdx = pass1Pages.count
-                var manualOverride = resolver.override(
+        let plannedJobs = jobs
+        let totalScans = source.count
+        var scanResults = try await BoundedParallel.map(
+            count: plannedJobs.count,
+            jobs: jobCount,
+            progress: { completed in progress?(completed, totalScans) }
+        ) { (i: Int) async throws(PipelineError) -> ScanResult in
+            try await self.processScan(plannedJobs[i], source: source, context: context)
+        }
+
+        // Number the pages in order, applying drops, blank pruning and every page edit.
+        var numbered: [NumberedPage] = []
+        var prunedPages: [PrunedPageRecord] = []
+        var splitScanNumbers: Set<Int> = []
+        var correctedEdits: [Int: [PageSide: HeavyPageEdits]] = [:]
+        for (srcIdx, result) in scanResults.enumerated() {
+            if result.slices.count > 1 { splitScanNumbers.insert(scanNumbers[srcIdx]) }
+            for (sliceIndex, slice) in result.slices.enumerated() {
+                let outIdx = numbered.count
+                let manualOverride = resolver.override(
                     outputIndex: outIdx,
                     scanIndex: srcIdx,
                     side: slice.side,
@@ -1360,183 +1445,118 @@ public struct BookPipelineCoordinator: Sendable {
                     }
                 }
 
-                // 1a. Multi-scale Deskew
-                let skewEstimate = SkewEstimator.estimateSkew(in: slice.buffer)
-                let appliedSkew = manualOverride?.overrideSkewDegrees ?? skewEstimate.angleDegrees
-                let deskewedGray = SkewEstimator.deskew(
-                    slice.buffer,
-                    by: appliedSkew,
-                    accelerator: accelerator
-                )
-
-                // 1b. Binarize deskewed page for text-line tracing & possible 3D cubic-sheet dewarping
-                let initialBinary = binarizer.binarize(deskewedGray, accelerator: accelerator)
-                let fallbackContext = configuration.enableBorderFallback
-                    ? geometryRecord.borderFallbackContext(
-                        splitSide: slice.side,
-                        policy: manualOverride?.borderFallback,
-                        marginalConfidence: configuration.borderFallbackMarginalConfidence
-                    )
-                    : nil
-                let (initialCleaned, initialFallback) = cleaner.clean(initialBinary, fallback: fallbackContext)
-                var borderFallbackResult = initialFallback
-
-                let tracedLines = tracer.traceLines(in: initialCleaned)
-                let pageSize = Size2I(width: deskewedGray.width, height: deskewedGray.height)
-
-                var finalCleaned = initialCleaned
-                var dewarpApplied = false
-                var verticalSagPixels = 0.0
-                var residualRMS = 0.0
-
-                let shouldAllowDewarp = configuration.enableDewarp && !(manualOverride?.disableDewarp ?? false)
-                if shouldAllowDewarp {
-                    let solution = dewarpSolver.solve(pageSize: pageSize, lines: tracedLines)
-                    if let model = solution.model {
-                        residualRMS = model.residualRMSPixels
-                        // Evaluate peak vertical excursion across u in [-0.85, 0.85]
-                        var minZ = 0.0
-                        var maxZ = 0.0
-                        for step in -17...17 {
-                            let u = Double(step) * 0.05
-                            let z = model.depthProfile(u: u)
-                            if z < minZ { minZ = z }
-                            if z > maxZ { maxZ = z }
-                        }
-                        verticalSagPixels = (maxZ - minZ) * model.halfHeight
-
-                        if verticalSagPixels >= minSagPixels {
-                            let dewarpedGray = accelerator.meshWarp(
-                                deskewedGray,
-                                displacementGrid: solution.grid,
-                                outputSize: pageSize
-                            )
-                            let dewarpedGlyphScale = fontScaleAnalyzer.analyzePage(
-                                in: initialCleaned,
-                                declaredDPI: deskewedGray.dpi,
-                                ocrObservations: []
-                            ).map { BackgroundNormalizer.GlyphScale(metrics: $0) }
-                            let dewarpedBinary = binarizer.binarize(
-                                dewarpedGray,
-                                accelerator: accelerator,
-                                glyphScale: dewarpedGlyphScale
-                            )
-                            let (dewarpedCleaned, dewarpedFallback) = cleaner.clean(dewarpedBinary, fallback: fallbackContext)
-                            finalCleaned = dewarpedCleaned
-                            borderFallbackResult = dewarpedFallback
-                            dewarpApplied = true
-                        }
-                    }
+                // An edit by page number, or a stored manifest's override, that changes pixels: process again.
+                // (Such a page has an override, so it is never pruned as blank and the numbering stands.)
+                let finalEdits = HeavyPageEdits(manualOverride)
+                if finalEdits != slice.edits {
+                    correctedEdits[srcIdx, default: jobs[srcIdx].edits][slice.side] = finalEdits
                 }
 
-                // 1c. Pass 1 Content Box Detection (or manual override)
-                var detection = contentDetector.detect(
-                    in: finalCleaned,
-                    dpi: configuration.processingDPI,
-                    splitSide: slice.side
-                )
-                if let nudge = manualOverride?.contentBoxNudge {
-                    // Nudge the absolute box if one was given, otherwise the detected one; keep the result as an
-                    // absolute box so the stored override stays idempotent.
-                    if let base = manualOverride?.overrideContentBox ?? detection.contentBox,
-                       let nudged = nudge.applied(to: base, within: pageSize) {
-                        manualOverride?.overrideContentBox = nudged
-                        manualOverride?.contentBoxNudge = nil
-                    } else {
-                        resolver.note(page: outIdx, ignored: "contentBox.nudge", reason: "the page has no content box to nudge, or the nudge removes it")
-                        manualOverride?.contentBoxNudge = nil
-                    }
-                }
-                if let customBox = manualOverride?.overrideContentBox {
-                    let customCluster = ContentBoxDetector.Cluster(
-                        exactBounds: customBox,
-                        foregroundPixels: max(1, finalCleaned.cropped(to: customBox).countBlackPixels())
+                // Blank sub-page pruning (pages with any edit are kept).
+                if configuration.autoPruneBlankPages && manualOverride == nil && slice.isBlank == true {
+                    prunedPages.append(
+                        PrunedPageRecord(
+                            sourcePageIndex: srcIdx,
+                            splitSide: slice.side,
+                            inkDensity: slice.inkDensity,
+                            reason: "Blank sub-page slice (ink density \(String(format: "%.4f", slice.inkDensity)) < \(String(format: "%.4f", configuration.blankPageInkDensityThreshold)), 0 OCR words)"
+                        )
                     )
-                    detection = ContentBoxDetector.DetectionResult(
-                        contentBox: customBox,
-                        mainBodyBox: customBox,
-                        retainedClusters: [customCluster],
-                        rejectedBoxes: detection.rejectedBoxes,
-                        confidence: 1.0
-                    )
+                    continue
                 }
 
-                // 1d. Blank sub-page auto-pruning check
-                if configuration.autoPruneBlankPages && manualOverride == nil {
-                    let totalPixels = finalCleaned.width * finalCleaned.height
-                    let blackPixels = finalCleaned.countBlackPixels()
-                    let inkDensity = totalPixels > 0 ? Double(blackPixels) / Double(totalPixels) : 0.0
-
-                    if inkDensity < configuration.blankPageInkDensityThreshold {
-                        var isBlankConfirmed = false
-                        if let ocrEngine {
-                            let checkBitmap: BinaryBitmap
-                            if configuration.processingDPI >= configuration.outputDPI * 2 {
-                                checkBitmap = accelerator.downsampleBinaryTo300DPI(finalCleaned)
-                            } else {
-                                checkBitmap = finalCleaned
-                            }
-                            do {
-                                let ocrObservations = try await ocrEngine.recognizeText(
-                                    in: checkBitmap,
-                                    dpi: configuration.outputDPI,
-                                    languages: configuration.ocrLanguages
-                                )
-                                // Require at least one substantive word containing letters with confidence >= 0.60
-                                // to prevent scanner glass dust, specks, or punctuation noise (e.g. "2%" at conf 0.5)
-                                // from keeping empty flatbed / cover slices.
-                                let substantiveWords = ocrObservations.filter { obs in
-                                    obs.confidence >= 0.60 && obs.text.contains { $0.isLetter }
-                                }
-                                if substantiveWords.isEmpty {
-                                    isBlankConfirmed = true
-                                }
-                            } catch {
-                                if detection.contentBox == nil || detection.retainedClusters.isEmpty {
-                                    isBlankConfirmed = true
-                                }
-                            }
-                        } else {
-                            if detection.contentBox == nil || detection.retainedClusters.isEmpty {
-                                isBlankConfirmed = true
-                            }
-                        }
-
-                        if isBlankConfirmed {
-                            prunedPages.append(
-                                PrunedPageRecord(
-                                    sourcePageIndex: srcIdx,
-                                    splitSide: slice.side,
-                                    inkDensity: inkDensity,
-                                    reason: "Blank sub-page slice (ink density \(String(format: "%.4f", inkDensity)) < \(String(format: "%.4f", configuration.blankPageInkDensityThreshold)), 0 OCR words)"
-                                )
-                            )
-                            continue
-                        }
-                    }
-                }
-
-                pass1Pages.append(
-                    Pass1Page(
-                        outputPageIndex: outIdx,
-                        sourcePageIndex: srcIdx,
-                        splitSide: slice.side,
-                        bookSide: bookSide,
-                        splitConfidence: splitDecision.confidence,
-                        skewAngleDegrees: appliedSkew,
-                        skewConfidence: skewEstimate.confidence,
-                        dewarpApplied: dewarpApplied,
-                        dewarpVerticalSagPixels: verticalSagPixels,
-                        dewarpResidualRMSPixels: residualRMS,
-                        tracedLines: tracedLines,
-                        cleanedBitmap: finalCleaned,
-                        detection: detection,
-                        manualOverride: manualOverride,
-                        borderFallback: borderFallbackResult
-                    )
-                )
+                numbered.append(NumberedPage(
+                    sourceIndex: srcIdx,
+                    sliceIndex: sliceIndex,
+                    outputIndex: outIdx,
+                    bookSide: bookSide,
+                    manualOverride: manualOverride
+                ))
             }
         }
+
+        if !correctedEdits.isEmpty {
+            let rerunScans = correctedEdits.keys.sorted()
+            let rerunJobs = rerunScans.map { srcIdx -> ScanJob in
+                var job = jobs[srcIdx]
+                job.edits = correctedEdits[srcIdx] ?? job.edits
+                return job
+            }
+            let redone = try await BoundedParallel.map(count: rerunJobs.count, jobs: jobCount) { (i: Int) async throws(PipelineError) -> ScanResult in
+                try await self.processScan(rerunJobs[i], source: source, context: context)
+            }
+            for (srcIdx, result) in zip(rerunScans, redone) {
+                // Same scan, same split: only the slices' pixels differ.
+                scanResults[srcIdx].slices = result.slices
+                scanResults[srcIdx].reused = scanResults[srcIdx].reused && result.reused
+                scanResults[srcIdx].clock.merge(result.clock)
+            }
+        }
+
+        // 1c (continued). Content-box edits, applied over the automatic detection.
+        var pass1Pages: [Pass1Page] = []
+        pass1Pages.reserveCapacity(numbered.count)
+        for page in numbered {
+            let result = scanResults[page.sourceIndex]
+            let slice = result.slices[page.sliceIndex]
+            let finalCleaned = slice.cleaned
+            let pageSize = Size2I(width: finalCleaned.width, height: finalCleaned.height)
+            var manualOverride = page.manualOverride
+            var detection = slice.detection
+            if let nudge = manualOverride?.contentBoxNudge {
+                // Nudge the absolute box if one was given, otherwise the detected one; keep the result as an
+                // absolute box so the stored override stays idempotent.
+                if let base = manualOverride?.overrideContentBox ?? detection.contentBox,
+                   let nudged = nudge.applied(to: base, within: pageSize) {
+                    manualOverride?.overrideContentBox = nudged
+                    manualOverride?.contentBoxNudge = nil
+                } else {
+                    resolver.note(page: page.outputIndex, ignored: "contentBox.nudge", reason: "the page has no content box to nudge, or the nudge removes it")
+                    manualOverride?.contentBoxNudge = nil
+                }
+            }
+            if let customBox = manualOverride?.overrideContentBox {
+                let customCluster = ContentBoxDetector.Cluster(
+                    exactBounds: customBox,
+                    foregroundPixels: max(1, finalCleaned.cropped(to: customBox).countBlackPixels())
+                )
+                detection = ContentBoxDetector.DetectionResult(
+                    contentBox: customBox,
+                    mainBodyBox: customBox,
+                    retainedClusters: [customCluster],
+                    rejectedBoxes: detection.rejectedBoxes,
+                    confidence: 1.0
+                )
+            }
+
+            pass1Pages.append(
+                Pass1Page(
+                    outputPageIndex: page.outputIndex,
+                    sourcePageIndex: page.sourceIndex,
+                    splitSide: slice.side,
+                    bookSide: page.bookSide,
+                    splitConfidence: result.header.split.confidence,
+                    skewAngleDegrees: slice.appliedSkewDegrees,
+                    skewConfidence: slice.skewEstimate.confidence,
+                    dewarpApplied: slice.dewarpApplied,
+                    dewarpVerticalSagPixels: slice.dewarpVerticalSagPixels,
+                    dewarpResidualRMSPixels: slice.dewarpResidualRMSPixels,
+                    tracedLines: slice.tracedLines,
+                    cleanedBitmap: finalCleaned,
+                    detection: detection,
+                    manualOverride: manualOverride,
+                    borderFallback: slice.borderFallback
+                )
+            )
+        }
+        let sourceGeometry = scanResults.map(\.header.geometry)
+        let sourceSplits = scanResults.map(\.header.split)
+        let scansReused = scanResults.filter(\.reused).count
+        var workClock = StageClock()
+        for result in scanResults { workClock.merge(result.clock) }
+        scanResults = []
+        let pass1Elapsed = ContinuousClock.now - pass1Start
+        let pass2Start = ContinuousClock.now
 
         // --- Running headers & top baselines (telemetry only; changes no pixels) ---
         var topAnchors: [PageTopAnchor?] = Array(repeating: nil, count: pass1Pages.count)
@@ -1714,6 +1734,11 @@ public struct BookPipelineCoordinator: Sendable {
         }
         var isolatedOutputPages: [Int] = []
 
+        // Each page's final plan: its own canvas for an isolated outlier, then any manual offset.
+        var finalPlans: [MarginHarmonizer.PageLayoutPlan] = []
+        var isolatedCanvasFlags: [Bool] = []
+        finalPlans.reserveCapacity(pass1Pages.count)
+        isolatedCanvasFlags.reserveCapacity(pass1Pages.count)
         for (idx, p1) in pass1Pages.enumerated() {
             var plan = overriddenPlans[idx]
             var isolatedCanvas = false
@@ -1733,38 +1758,55 @@ public struct BookPipelineCoordinator: Sendable {
             if let offset = p1.manualOverride?.destinationOffset {
                 plan.destinationOrigin = Point2I(x: plan.destinationOrigin.x + offset.x, y: plan.destinationOrigin.y + offset.y)
             }
+            finalPlans.append(plan)
+            isolatedCanvasFlags.append(isolatedCanvas)
+        }
+        let pass2Elapsed = ContinuousClock.now - pass2Start
 
-            // A run that stops after the layout renders nothing: the page sizes below come from the plan alone.
-            var framed600: BinaryBitmap? = nil
-            var renderedBitmap: BinaryBitmap? = nil
-            if !stopsAfterLayout {
-                let framed = harmonizer.renderPage(from: p1.cleanedBitmap, plan: plan)
-                framed600 = framed
-                renderedBitmap = shouldDownsample2x ? accelerator.downsampleBinaryTo300DPI(framed) : framed
-            }
-
-            var ocrObservations: [RecognizedTextObservation] = []
-            if let ocrEngine, let finalBitmap = renderedBitmap {
-                do {
-                    ocrObservations = try await ocrEngine.recognizeText(
-                        in: finalBitmap,
-                        dpi: configuration.outputDPI,
-                        languages: configuration.ocrLanguages
-                    )
+        // Render, downsample and recognize the pages in parallel (a run that stops after the layout renders nothing).
+        let pass3Start = ContinuousClock.now
+        let shouldCollectScaleTelemetry = configuration.enableAutomaticFontScaleCalibration || (effectivePreScaleDecision != nil)
+        let cachedOCR = ocrEngine.map { CachedOCR(engine: $0, cache: cache) }
+        let renderPlans = finalPlans
+        let renderSources = pass1Pages.map(\.cleanedBitmap)
+        let processingDPIValue = configuration.processingDPI
+        let outputDPIValue = configuration.outputDPI
+        let ocrLanguages = configuration.ocrLanguages
+        let renderedPages = try await BoundedParallel.map(
+            count: stopsAfterLayout ? 0 : pass1Pages.count,
+            jobs: jobCount
+        ) { (idx: Int) async throws(PipelineError) -> RenderedPage in
+            var page = RenderedPage()
+            let plan = renderPlans[idx]
+            let framed = page.clock.measure("pass3.render") { harmonizer.renderPage(from: renderSources[idx], plan: plan) }
+            let output = page.clock.measure("pass3.render") { shouldDownsample2x ? accelerator.downsampleBinaryTo300DPI(framed) : framed }
+            page.bitmap = output
+            if let cachedOCR {
+                let start = ContinuousClock.now
+                do throws(OCRError) {
+                    (page.observations, page.ocrReused) = try await cachedOCR.recognize(output, dpi: outputDPIValue, languages: ocrLanguages)
                 } catch {
                     throw .ocrFailed(error)
                 }
+                page.clock.add("pass3.ocr", ContinuousClock.now - start)
             }
-
-            let shouldCollectScaleTelemetry = configuration.enableAutomaticFontScaleCalibration || (effectivePreScaleDecision != nil)
-            if shouldCollectScaleTelemetry && sampledGlyphPageIndices.contains(idx) && !plan.isDimensionOutlier, let framed600 {
-                if let glyphMetrics = fontScaleAnalyzer.analyzePage(
-                    in: framed600,
-                    declaredDPI: configuration.processingDPI,
-                    ocrObservations: ocrObservations
-                ) {
-                    postCalibrationGlyphMetrics.append(glyphMetrics)
+            if shouldCollectScaleTelemetry && sampledGlyphPageIndices.contains(idx) && !plan.isDimensionOutlier {
+                let observations = page.observations
+                page.glyphMetrics = page.clock.measure("pass3.glyphTelemetry") {
+                    fontScaleAnalyzer.analyzePage(in: framed, declaredDPI: processingDPIValue, ocrObservations: observations)
                 }
+            }
+            return page
+        }
+
+        for (idx, p1) in pass1Pages.enumerated() {
+            let plan = finalPlans[idx]
+            let isolatedCanvas = isolatedCanvasFlags[idx]
+            let renderedBitmap = stopsAfterLayout ? nil : renderedPages[idx].bitmap
+            let ocrObservations = stopsAfterLayout ? [] : renderedPages[idx].observations
+            if !stopsAfterLayout {
+                if let metrics = renderedPages[idx].glyphMetrics { postCalibrationGlyphMetrics.append(metrics) }
+                workClock.merge(renderedPages[idx].clock)
             }
 
             let outputWidthPixels = renderedBitmap?.width ?? max(1, shouldDownsample2x ? plan.canvasSize.width / 2 : plan.canvasSize.width)
@@ -1821,7 +1863,8 @@ public struct BookPipelineCoordinator: Sendable {
             let pageBoxPoints = Rect2D(x: 0, y: 0, width: pageWidthPoints, height: pageHeightPoints)
 
             if let finalBitmap = renderedBitmap {
-                do {
+                let start = ContinuousClock.now
+                do throws(PDFWriteError) {
                     try writer.appendPage(
                         bitmap: finalBitmap,
                         dpi: configuration.outputDPI,
@@ -1831,6 +1874,7 @@ public struct BookPipelineCoordinator: Sendable {
                 } catch {
                     throw .pdfWriteFailed(error)
                 }
+                workClock.add("pass3.write", ContinuousClock.now - start)
             }
 
             var dimensionRecord = dimensionResult.records[idx]
@@ -1871,12 +1915,15 @@ public struct BookPipelineCoordinator: Sendable {
         }
 
         if !stopsAfterLayout {
+            let start = ContinuousClock.now
             do {
                 try writer.finalize()
             } catch {
                 throw .pdfWriteFailed(error)
             }
+            workClock.add("pass3.write", ContinuousClock.now - start)
         }
+        let pass3Elapsed = ContinuousClock.now - pass3Start
 
         let rawCanonicalInches = Size2D(
             width: Double(bookLayout.canvasSize.width) / Double(configuration.processingDPI),
@@ -1920,7 +1967,7 @@ public struct BookPipelineCoordinator: Sendable {
             )
             : nil
 
-        let manifest = BookProcessingManifest(
+        var manifest = BookProcessingManifest(
             processingDPI: configuration.processingDPI,
             outputDPI: configuration.outputDPI,
             canonicalCanvasSizeAtProcessingDPI: bookLayout.canvasSize,
@@ -1942,6 +1989,28 @@ public struct BookPipelineCoordinator: Sendable {
             dimensionConsensus: finalDimensionSummary,
             adjustments: adjustmentReport,
             sourceScanNumbers: scanNumbers
+        )
+
+        func seconds(_ d: Duration) -> Double { Double(d.components.seconds) + Double(d.components.attoseconds) * 1e-18 }
+        var timings: [PipelineRunReport.StageTiming] = [
+            .init(stage: "total", seconds: seconds(ContinuousClock.now - runStart), isElapsed: true),
+            .init(stage: "pass1", seconds: seconds(pass1Elapsed), isElapsed: true),
+            .init(stage: "pass2", seconds: seconds(pass2Elapsed), isElapsed: true),
+            .init(stage: "pass3", seconds: seconds(pass3Elapsed), isElapsed: true),
+        ]
+        timings += workClock.timings
+        manifest.run = PipelineRunReport(
+            jobs: jobCount,
+            cache: configuration.cache.map { options in
+                PipelineRunReport.CacheReport(
+                    scansReused: cache == nil ? 0 : scansReused,
+                    scans: totalScans,
+                    ocrReused: renderedPages.filter { $0.ocrReused }.count,
+                    ocrPages: cachedOCR == nil ? 0 : renderedPages.count,
+                    directory: options.directory.path
+                )
+            },
+            timings: timings
         )
 
         return PipelineOutput(

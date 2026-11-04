@@ -25,6 +25,11 @@ public struct AppleVisionOCREngine: OCREngine, Sendable {
         self.minimumTextHeight = minimumTextHeight
     }
 
+    /// The settings plus the operating system version, whose Vision models decide the text.
+    public var cacheIdentity: String {
+        "AppleVisionOCREngine(languageCorrection: \(usesLanguageCorrection), minimumTextHeight: \(String(describing: minimumTextHeight)), os: \(ProcessInfo.processInfo.operatingSystemVersionString))"
+    }
+
     /// Recognizes text lines within a 1-bit monochrome bitmap.
     ///
     /// Returned bounding boxes use normalized top-left page coordinates `[0.0, 1.0] x [0.0, 1.0]`

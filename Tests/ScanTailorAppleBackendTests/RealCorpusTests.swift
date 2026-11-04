@@ -213,4 +213,29 @@ struct RealCorpusTests {
         #expect(report.applied.map(\.reference).sorted() == ["s5", "s6"], "\(report)")
         #expect(report.ignored.map(\.reference) == ["s1"] && report.ignored.first?.reason.contains("not processed") == true, "\(report)")
     }
+
+    @Test("SLE.2 (scans 2-8): four jobs and a warm cache give the serial result; the warm layout run reuses every scan")
+    func cachedParallelEqualsSerial() async throws {
+        let root = try #require(corpusDirectory)
+        let url = URL(fileURLWithPath: root).appendingPathComponent(Self.sle.relativePath)
+        let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("ScanTailorCorpusCache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+        let options = PipelineCacheOptions(directory: cacheDir, codeVersion: "corpus-test", sourceFingerprint: PipelineCacheOptions.fingerprint(ofFileAt: url))
+        #expect(options.sourceFingerprint != nil)
+
+        func comparable(_ run: Run) -> BookProcessingManifest {
+            var m = run.manifest
+            m.run = nil
+            return m
+        }
+        let serial = try await Self.run(Self.sle) { $0.stopAfter = .layout }
+        let cold = try await Self.run(Self.sle) { $0.stopAfter = .layout; $0.jobs = 4; $0.cache = options }
+        let warm = try await Self.run(Self.sle) { $0.stopAfter = .layout; $0.jobs = 4; $0.cache = options }
+        #expect(comparable(cold) == comparable(serial))
+        #expect(comparable(warm) == comparable(serial))
+        #expect(warm.output.cleanedBitmapsAtProcessingDPI == serial.output.cleanedBitmapsAtProcessingDPI)
+        #expect(cold.manifest.run?.cache?.scansReused == 0)
+        #expect(warm.manifest.run?.cache?.scansReused == 7)
+        #expect(serial.manifest.dimensionConsensus?.splitVetoedSourcePages == [3], "the landscape table is found from the page boxes")
+    }
 }

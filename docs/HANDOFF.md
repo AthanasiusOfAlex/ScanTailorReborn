@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-11-04  
 **Branch**: `main`  
-**Current Active Milestone**: Phase 6, Substeps 6.1.1, 6.1.2, 6.2.1, 6.2.2 and 6.3.1 done. Next: **Substep 6.3.2 — Cache-Accelerated Re-Rendering** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 6) — *not yet started*
+**Current Active Milestone**: Phase 6 complete (Substeps 6.1.1–6.3.2). Next: **Phase 7, Substep 7.1.1 — Multi-Document Benchmark Validation** ([`docs/WHITE_PAPER.md`](WHITE_PAPER.md), Phase 7) — *not yet started*
 
 This document captures everything required to set up **ScanTailorReborn** on a new machine and resume engineering seamlessly with zero lost context.
 
@@ -61,12 +61,12 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
   - **Phase 4**: Physical Scale & Scale-Invariant Lighting (`4.1.1` – `4.2.2`) — **Completed**
   - **Phase 5**: Page Quadrangle & Desk Excision (`5.1.1` – `5.2.2`) — **Completed**
-  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — In progress (`6.1.1`–`6.3.1` done)
+  - **Phase 6**: Canonical Layout & Agentic Manifest CLI (`6.1.1` – `6.3.2`) — **Completed**
   - **Phase 7**: Verification & Final `v1.0.0` Release (`7.1.1` – `7.2.2`) — Pending
 
 ---
 
-## 3. Completed Substeps (`4.1.1`–`6.3.1`)
+## 3. Completed Substeps (`4.1.1`–`6.3.2`)
 
 ### 3.1 Recently Completed: Substep 4.1.1 (`FontScaleAnalyzer`)
 Implemented automatic font-scale heuristic, median glyph height analyzer, and pre-raster camera-wrapper scale rescue across 4 source/CLI/test layers:
@@ -256,16 +256,43 @@ The tool is a power tool for an iterate-and-inspect loop (default run → look �
 
 ---
 
+### 3.15 Recently Completed: Substep 6.3.2 (Cached and Parallel Re-Runs)
+Goal: an agent iterating with `--apply-manifest` / `--stop-after layout` should not pay for pass 1 on every iteration.
+
+1. **Measured first** (Flannery 1993, 16 scans, before the change): 26.8 s, of which pass 1 19.2 s (binarizing alone 13.9 s, i.e. `BackgroundNormalizer`), OCR 4.0 s, pass 2, render and PDF writing well under 1 s together. Nothing ran in parallel; peak memory 8 GB.
+2. **Pass-1 cache** ([`ScanProcessing.swift`](../Sources/ScanTailorPipeline/ScanProcessing.swift), [`PipelineCache.swift`](../Sources/ScanTailorPipeline/PipelineCache.swift)): per scan a `ScanHeader` (geometry record, split decision, sides) and per page a `SliceOutcome` (cleaned bitmap, skew, dewarp telemetry, traced lines, border fallback, automatic detection, ink density, blank verdict). Keys are SHA-256 of: code version, every pass-1 setting (`pass1Fingerprint`: binarizer, cleaner, detector, rectifier, masker, font-scale config, DPIs, dewarp, pruning, page size, accelerator type, OCR identity and languages), the scan's identity (PDF content hash + scan index + render DPI, or the pixels for buffer input), the scan-level edits (split mode after veto, `splitX`, geometry override) and, per page, the pixel-changing edits (`HeavyPageEdits`: skew, disableDewarp, borderFallback). Entries are binary plists, LZFSE-compressed (~275 KB per page), written to a temp file and renamed; any unreadable entry is a miss. Content-box rect/nudge, tier, offset, outlier, page size, keep/drop and all book options are applied after the cache, so they cost only the cheap passes. A cache hit does not even rasterize the scan.
+3. **OCR cache** (`CachedOCR`): keyed by the rendered output bitmap, `OCREngine.cacheIdentity` (new protocol requirement with a `String(reflecting:)` default; Tesseract sorts its `variables` and adds library versions, Vision adds the OS version, Dual combines both) and languages. Every page is re-rendered and the PDF rewritten each run (cheap); only pages whose pixels changed are recognized again.
+4. **Parallelism** ([`BoundedParallel.swift`](../Sources/ScanTailorPipeline/BoundedParallel.swift)): pass 1 runs scans and pass 3 renders and recognizes pages at most `jobs` at a time, results in input order. Scans are loaded one at a time by their job (sizes for the landscape split veto come from the page boxes, computed exactly as the reader does). Output numbers, `.single` book sides, drops and blank pruning are assigned afterwards in scan order; page edits are matched speculatively by scan name only, and a page whose final pixel-changing edits differ (an edit by plain page number, or a stored manifest's override) is processed again; such a page has an override, so it is never pruned and the numbering stands. Even one job runs in a child task: memory that Metal/CoreGraphics release only when a task ends was what made the old serial run peak at 8 GB.
+5. **Run report** (`BookProcessingManifest.run`, `PipelineRunReport`): jobs, cache counts, elapsed time per pass and work time per stage summed over jobs. It changes every run; leave it out when comparing manifests.
+6. **CLI**: `-j/--jobs <n>` (default 4), `--cache-dir <dir>` (default `~/Library/Caches/ScanTailorReborn`), `--no-cache`, `--timings`. The code version is the executable's Mach-O `LC_UUID` (`ScanTailorCLI.buildIdentity()`), so a rebuilt binary never reuses older results; the source identity is a SHA-256 of the PDF (about 0.3 s per 500 MB). One line per run: `Cache: 15/16 scans reused, OCR of 3/16 pages reused (...)`. Progress now reads "Processed scan n/total".
+7. **Results** (Flannery 1993, 16 scans, release build, 8P+2E cores, 32 GB):
+
+   | Run | Wall | Peak memory |
+   |---|---|---|
+   | before 6.3.2 (serial, everything in memory) | 26.8 s | 8.1 GB |
+   | `--jobs 1 --no-cache` | 27.4 s | 1.45 GB |
+   | `--jobs 2` / `4` / `8`, cold | 16.0 / 12.5 / 10.9 s | 2.2 / 4.2 / 5.4 GB |
+   | warm, nothing changed (full PDF) | 0.65 s | 0.19 GB |
+   | warm, `--stop-after layout` | 0.39 s | 0.16 GB |
+   | warm, skew on one scan + offset on one page | 6.4 s (one scan recomputed; 13 pages re-OCR'd because the book-wide frame moved) | — |
+   | warm, skew by page number | 2.8 s (`--stop-after layout`, one scan) | — |
+
+   Cold, warm and serial runs give identical manifests (without `run`) and identical PDF content (only creation date and file ID differ). OCR (Apple Vision) gains little from parallelism (5.2 → 4.5 s).
+8. **Tests**: [`PipelineCacheTests.swift`](../Tests/ScanTailorCoreTests/PipelineCacheTests.swift) (9 tests, ~2 s: warm = cold with zero OCR calls; parallel = serial with splits, drops and page-number edits; one pixel edit re-processes one scan, layout edits none; page-number edits cached after correction; new code version / changed option reuses nothing; corrupt and missing entries recomputed; a stopped run fills the cache; `BoundedParallel` order, limit, progress, errors; CLI flags and formatting) and a corpus test (SLE.2 scans 2–8: four jobs, cold and warm cache equal the serial run; the landscape veto still found from page boxes).
+9. **Known limitations**: (a) a content-box or skew change on one page usually moves the book-wide frame, so most pages' pixels change and their OCR runs again (OCR keyed by the placed text block instead of the page would avoid it); (b) the cache is never pruned: delete the directory (safe at any time); about 275 KB per page plus OCR; (c) every rebuild invalidates everything (by design: no stale results); (d) `PipelineOutput` still holds every cleaned 600 DPI bitmap (about 4 MB per page at 600 DPI, i.e. ~2 GB for 500 pages); (e) binarizing (`BackgroundNormalizer`, ~0.9 s per page) is untouched and remains the cold-run cost; (f) a stored manifest's overrides keyed by output number (pre-existing, §3.14 g) also drive re-processing.
+
+---
+
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 6, Substep 6.3.2**, copy and provide the following prompt:
+To begin **Phase 7, Substep 7.1.1**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 6.3.2 — Cache-Accelerated Re-Rendering.
+We are resuming ScanTailorReborn on Substep 7.1.1 — Multi-Document Benchmark Validation.
 
 1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.11–3.14) and `docs/WHITE_PAPER.md` Phase 6, Step 6.3. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
-3. Goal: an agent iterating with `--apply-manifest` / `--stop-after layout` should not pay for pass 1 (rasterize, rectify, split, deskew, dewarp, binarize, clean: about 1.3 s per 600 DPI scan) on every iteration. Propose a design: what to cache (per-scan cleaned 600 DPI bitmaps keyed by scan content + the options that affect them), where (a `--cache-dir`), how to invalidate (hash of scan, options, version), which adjustments force recomputation of a scan (skew, dewarp, split, geometry) and which only re-run the cheap tail (content box, tier, offset, outlier, margins, page size), and how to re-render only the changed pages. Measure first: time each stage on a real sample. Pause for approval before implementing.
+2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.13–3.15) and `docs/WHITE_PAPER.md` Phase 7 and the 10 v1.0 release criteria. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
+3. Goal: process Flannery 1993, Vermeersch 1934 and Simpson 1968 end to end and check each v1.0 release criterion in automated (opt-in corpus) tests. Use short samples where a criterion allows it; use `--jobs` and the cache (Substep 6.3.2) to keep runs short. Propose which criterion is checked how, on which pages, and the expected run time. Pause for approval before implementing.
 4. After approval, implement with tests, confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before Phase 7.
+5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before 7.1.2.
 ```

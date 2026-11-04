@@ -141,6 +141,13 @@ public struct TesseractOCREngine: OCREngine, Sendable {
         self.init(configuration: Configuration(tessdataPath: tessdataPath, defaultLanguages: defaultLanguages))
     }
 
+    /// The settings (with `variables` in key order) and the Tesseract and Leptonica versions.
+    public var cacheIdentity: String {
+        let c = configuration
+        let variables = c.variables.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+        return "TesseractOCREngine(tessdata: \(c.tessdataPath ?? "-"), languages: \(c.defaultLanguages), oem: \(c.engineMode), psm: \(c.pageSegmentationMode), granularity: \(c.granularity), space: \(c.coordinateSpace), minConfidence: \(c.minimumConfidence), variables: [\(variables)], tesseract: \(Self.tesseractVersion), leptonica: \(Self.leptonicaVersion))"
+    }
+
     // MARK: - Version & Environment Discovery
 
     /// Returns the runtime `libtesseract` version string (e.g., `"5.5.3"`).

@@ -1,4 +1,5 @@
 import Foundation
+import MachO
 import ScanTailorAppleBackend
 import ScanTailorContracts
 import ScanTailorCore
@@ -117,6 +118,14 @@ public struct ScanTailorCLI {
         public var stopAfter: PipelineStop? = nil
         /// Write layout contact sheets into the diagnostics directory (`--layout-sheets`; automatic with `--stop-after`).
         public var layoutSheets: Bool = false
+        /// Scans and pages processed at the same time (`--jobs`).
+        public var jobs: Int = ScanTailorCLI.defaultJobs
+        /// Reuse results of earlier runs (`--no-cache` turns it off).
+        public var useCache: Bool = true
+        /// Cache directory (`--cache-dir`; `nil` is ``PipelineCacheOptions/defaultDirectory``).
+        public var cacheDirPath: String? = nil
+        /// Print the per-stage timing table (`--timings`).
+        public var showTimings: Bool = false
 
         public init(inputPDFPath: String, outputPDFPath: String) {
             self.inputPDFPath = inputPDFPath
@@ -182,6 +191,10 @@ public struct ScanTailorCLI {
         var applyManifestPath: String? = nil
         var stopAfter: PipelineStop? = nil
         var layoutSheets = false
+        var jobs = defaultJobs
+        var useCache = true
+        var cacheDirPath: String? = nil
+        var showTimings = false
 
         var i = 0
         while i < args.count {
@@ -387,6 +400,22 @@ public struct ScanTailorCLI {
             case "--layout-sheets":
                 layoutSheets = true
                 i += 1
+            case "--jobs", "-j":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let n = Int(args[i + 1]), n >= 1 else { throw .invalidOptionValue(flag: arg, value: args[i + 1]) }
+                jobs = n
+                i += 2
+            case "--cache-dir":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                cacheDirPath = args[i + 1]
+                useCache = true
+                i += 2
+            case "--no-cache":
+                useCache = false
+                i += 1
+            case "--timings":
+                showTimings = true
+                i += 1
             case "--outlier-canvas":
                 guard i + 1 < args.count else { throw .missingValue(flag: arg) }
                 switch args[i + 1].lowercased() {
@@ -479,6 +508,10 @@ public struct ScanTailorCLI {
         opts.applyManifestPath = applyManifestPath
         opts.stopAfter = stopAfter
         opts.layoutSheets = layoutSheets || (stopAfter != nil && diagnosticsDirPath != nil)
+        opts.jobs = jobs
+        opts.useCache = useCache
+        opts.cacheDirPath = cacheDirPath
+        opts.showTimings = showTimings
         return opts
     }
 
@@ -584,7 +617,15 @@ public struct ScanTailorCLI {
             isolateOutlierCanvases: options.isolateOutlierCanvases,
             adjustments: options.adjustments,
             manualOutlierReferences: options.outlierScanRefs,
-            stopAfter: options.stopAfter
+            stopAfter: options.stopAfter,
+            jobs: options.jobs,
+            cache: options.useCache
+                ? PipelineCacheOptions(
+                    directory: options.cacheDirPath.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? PipelineCacheOptions.defaultDirectory,
+                    codeVersion: buildIdentity(),
+                    sourceFingerprint: PipelineCacheOptions.fingerprint(ofFileAt: inputURL)
+                )
+                : nil
         )
 
         let coordinator = BookPipelineCoordinator(configuration: pipeConfig)
@@ -600,7 +641,7 @@ public struct ScanTailorCLI {
                     ocrEngine: ocrEngine,
                     existingManifest: existingManifest
                 ) { completed, total in
-                    print("  Rasterized source page \(completed)/\(total) at 600 DPI")
+                    print("  Processed scan \(completed)/\(total)")
                 }
             } else {
                 let writer: ApplePDFDocumentWriter
@@ -616,7 +657,7 @@ public struct ScanTailorCLI {
                     ocrEngine: ocrEngine,
                     existingManifest: existingManifest
                 ) { completed, total in
-                    print("  Rasterized source page \(completed)/\(total) at 600 DPI")
+                    print("  Processed scan \(completed)/\(total)")
                 }
             }
         } catch let error as CLIError {
@@ -627,6 +668,10 @@ public struct ScanTailorCLI {
 
         if let report = result.manifest.adjustments {
             print(Self.formatAdjustmentReport(report))
+        }
+        if let run = result.manifest.run {
+            if let line = Self.formatCacheLine(run) { print(line) }
+            if options.showTimings { print(Self.formatTimings(run)) }
         }
 
         if result.manifest.physicalScaleAmbiguous {
@@ -990,6 +1035,54 @@ public struct ScanTailorCLI {
         return lines.joined(separator: "\n")
     }
 
+    /// Default for `--jobs`: four, or fewer on a machine with fewer cores.
+    public static let defaultJobs = max(1, min(4, ProcessInfo.processInfo.activeProcessorCount))
+
+    /// Identifies this build of the program, for the cache: the executable's Mach-O `LC_UUID`, which the linker
+    /// derives from the binary's contents (falls back to the executable's size and modification date).
+    public static func buildIdentity() -> String {
+        if let header = _dyld_get_image_header(0), header.pointee.magic == MH_MAGIC_64 {
+            var cursor = UnsafeRawPointer(header).advanced(by: MemoryLayout<mach_header_64>.size)
+            for _ in 0..<header.pointee.ncmds {
+                let command = cursor.loadUnaligned(as: load_command.self)
+                if command.cmd == UInt32(LC_UUID) {
+                    let uuid = cursor.loadUnaligned(as: uuid_command.self).uuid
+                    return "uuid:" + UUID(uuid: uuid).uuidString
+                }
+                cursor = cursor.advanced(by: Int(command.cmdsize))
+            }
+        }
+        let path = CommandLine.arguments.first ?? ""
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+        let date = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "file:\(size):\(date)"
+    }
+
+    /// One line: what the cache reused (`nil` when the cache was off).
+    public static func formatCacheLine(_ run: PipelineRunReport) -> String? {
+        guard let cache = run.cache else { return nil }
+        var line = "Cache: \(cache.scansReused)/\(cache.scans) scans reused"
+        if cache.ocrPages > 0 { line += ", OCR of \(cache.ocrReused)/\(cache.ocrPages) pages reused" }
+        return line + " (\(cache.directory); --no-cache to recompute)"
+    }
+
+    /// The `--timings` table: elapsed time per pass, then work time per stage summed over the parallel jobs.
+    public static func formatTimings(_ run: PipelineRunReport) -> String {
+        func s(_ v: Double) -> String { String(format: "%.2f s", v) }
+        let elapsed = run.timings.filter(\.isElapsed).map { "\($0.stage) \(s($0.seconds))" }.joined(separator: ", ")
+        var lines = ["Timings (elapsed, \(run.jobs) job\(run.jobs == 1 ? "" : "s")): \(elapsed)"]
+        let work = run.timings.filter { !$0.isElapsed }.sorted { $0.seconds > $1.seconds }
+        if !work.isEmpty {
+            lines.append("  Work time by stage, summed over jobs:")
+            let width = work.map(\.stage.count).max() ?? 0
+            for t in work {
+                lines.append("    " + t.stage.padding(toLength: width, withPad: " ", startingAt: 0) + "  " + s(t.seconds))
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     public static let usageText = """
     USAGE:
       scantailor-cli process <input.pdf> -o <output.pdf> [options]
@@ -1038,6 +1131,14 @@ public struct ScanTailorCLI {
                                    (aliases: --languages, --ocr-lang)
       --tessdata-dir <path>        Custom tessdata directory containing .traineddata files
       --portable-backend           Use pure-Swift portable compute accelerator instead of Metal GPU
+      -j, --jobs <n>               Scans and pages processed at the same time (default: 4). Results do not depend on
+                                   it; memory grows with it
+      --cache-dir <dir>            Where earlier results are reused from (default: ~/Library/Caches/ScanTailorReborn).
+                                   Cleaned pages are reused unless their scan or a pass-1 edit (split, splitX, skew,
+                                   disableDewarp, borderFallback, rectification, desk mask) or option changed; OCR
+                                   text is reused for any page whose pixels are unchanged. Safe to delete at any time
+      --no-cache                   Compute everything and store nothing
+      --timings                    Print elapsed time per pass and work time per stage
 
     ITERATING (agent or human):
       1. scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/     (fast: no PDF, no OCR)
@@ -1045,7 +1146,8 @@ public struct ScanTailorCLI {
          and look at d/layout-sheet-01.png ...                                        (red: canonical frame,
                                                                                        green: text block, orange: outlier)
       3. Write adjustments.json, then repeat step 1 with --apply-manifest adjustments.json
-      4. When satisfied, run without --stop-after to write the PDF.
+         (repeats are fast: unchanged scans come from the cache)
+      4. When satisfied, run without --stop-after to write the PDF (OCR is reused for unchanged pages).
 
     ADJUSTMENTS FILE (--apply-manifest; strict JSON; keys starting with "_" and "note" are ignored):
       {

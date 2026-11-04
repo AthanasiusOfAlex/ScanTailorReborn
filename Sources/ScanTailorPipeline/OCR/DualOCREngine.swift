@@ -48,6 +48,11 @@ public struct DualOCREngine: OCREngine, Sendable {
         self.strategy = strategy
     }
 
+    /// Both engines' identities and the synthesis strategy.
+    public var cacheIdentity: String {
+        "DualOCREngine(\(strategy); \(primary.cacheIdentity); \(secondary.cacheIdentity))"
+    }
+
     /// Recognizes text lines within a binary bitmap using dual-engine coordination.
     /// - Parameters:
     ///   - bitmap: 1-bit monochrome page image.
