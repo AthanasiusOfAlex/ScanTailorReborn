@@ -30,6 +30,15 @@ public struct ContentBoxDetector: Sendable {
         /// content width, and carrying little ink, are rejected (page-edge stack textures, gutter shadows).
         /// `0` disables the check.
         public var edgeNoiseIsolationGapFraction: Double
+        /// Strict margins, for camera photos whose margins hold desk residue (mug rims, the paper's own edge,
+        /// thumb-index tabs, outline curves of the page stack). Only clusters with real mass form the body;
+        /// everything outside the body block must pass as a running header, footer or page number: horizontal
+        /// (no taller than twice its width), inside the body's columns and within ``strictMarginGapFraction`` of
+        /// the body height from it. Thin line art is removed before clustering, and the body is the text block
+        /// found by fusing lines with a brick four times as tall.
+        public var strictMargins: Bool
+        /// Largest gap between the body and a header or footer in strict mode, as a fraction of the body height.
+        public var strictMarginGapFraction: Double
 
         public init(
             cleanBordersFirst: Bool = true,
@@ -40,8 +49,12 @@ public struct ContentBoxDetector: Sendable {
             minClusterForegroundPixelsAt600DPI: Int = 36,
             maxHeaderFooterGapFraction: Double = 0.14,
             headerFooterHorizontalToleranceFraction: Double = 0.04,
-            edgeNoiseIsolationGapFraction: Double = 0.01
+            edgeNoiseIsolationGapFraction: Double = 0.01,
+            strictMargins: Bool = false,
+            strictMarginGapFraction: Double = 0.04
         ) {
+            self.strictMargins = strictMargins
+            self.strictMarginGapFraction = min(max(0.005, strictMarginGapFraction), 0.35)
             self.edgeNoiseIsolationGapFraction = edgeNoiseIsolationGapFraction <= 0 ? 0 : min(max(0.003, edgeNoiseIsolationGapFraction), 0.5)
             self.cleanBordersFirst = cleanBordersFirst
             self.closingBrickWidthAt600DPI = max(8, closingBrickWidthAt600DPI)
@@ -213,6 +226,24 @@ public struct ContentBoxDetector: Sendable {
             }
         }
 
+        // Strict margins: drop line art (the paper's own rim, outline curves of the page stack) before clustering,
+        // so it cannot fuse with the text: a component spanning at least 0.4 in, under 8 % of its box inked and
+        // thin (ink per spanned pixel under 32 at 600 DPI). Blurry text can join into a large sparse web through a
+        // gutter shadow, but a web holding real text is far thicker than a stroke.
+        var lineArt: [Rect2I] = []
+        if configuration.strictMargins {
+            let minSpan = max(16, Int((256.0 * scale).rounded()))
+            let maxThickness = max(4.0, 32.0 * scale)
+            cleaned = ConnectedComponentAnalyzer.filterComponents(in: cleaned, connectivity: .eight) { comp in
+                let b = comp.boundingBox
+                let span = max(b.width, b.height)
+                let isLineArt = span >= minSpan && comp.pixelCount * 100 < b.width * b.height * 8
+                    && Double(comp.pixelCount) <= Double(span) * maxThickness
+                if isLineArt { lineArt.append(b) }
+                return !isLineArt
+            }
+        }
+
         // Extract fine connected components from the cleaned bitmap so we can compute exact bounds
         // and exact foreground pixel counts inside each morphologically fused cluster.
         let fineComponents = ConnectedComponentAnalyzer.extractComponents(from: cleaned, connectivity: .eight)
@@ -334,8 +365,19 @@ public struct ContentBoxDetector: Sendable {
         let peakClusterMass = bodyCandidates.map(\.foregroundPixels).max() ?? 1
 
         // Find the core cluster(s) that carry substantial mass (>= 10% of peak cluster mass or wide text line)
-        let coreClusters = bodyCandidates.filter { cluster in
-            cluster.foregroundPixels * 10 >= peakClusterMass || cluster.exactBounds.width >= width / 5
+        let strict = configuration.strictMargins
+        var coreClusters = bodyCandidates.filter { cluster in
+            cluster.foregroundPixels * 10 >= peakClusterMass || (!strict && cluster.exactBounds.width >= width / 5)
+        }
+        // Strict margins: the core is the text block, found by fusing lines with a brick four times as tall.
+        // Clusters break apart once rules and rims are gone, and a mug rim can then rival a paragraph.
+        if strict, let block = Self.textBlock(cleaned, fine: fineComponents, brickWidth: brickW, brickHeight: 4 * brickH) {
+            let inBlock = bodyCandidates.filter { cluster in
+                let box = cluster.exactBounds
+                let inside = box.intersection(block).map { $0.width * $0.height } ?? 0
+                return inside * 2 >= box.width * box.height
+            }
+            if !inBlock.isEmpty { coreClusters = inBlock }
         }
 
         var coreBox = (coreClusters.first ?? bodyCandidates[0]).exactBounds
@@ -349,9 +391,19 @@ public struct ContentBoxDetector: Sendable {
 
         var retainedBody: [Cluster] = []
         var rejectedBoxes: [Rect2I] = splitEdgeRejectedBoxes
+        var marginCandidates = peripheralOrSmall
 
         for cluster in bodyCandidates {
             let box = cluster.exactBounds
+            // Strict margins: a cluster that is neither core nor mostly inside the core block is judged as a
+            // header, footer or page number below.
+            if strict, !coreClusters.contains(cluster) {
+                let inside = box.intersection(coreBox).map { $0.width * $0.height } ?? 0
+                if inside * 2 < box.width * box.height {
+                    marginCandidates.append(cluster)
+                    continue
+                }
+            }
             // Horizontal distance from coreBox
             let hDist: Int
             if box.maxX < coreBox.minX {
@@ -377,6 +429,7 @@ public struct ContentBoxDetector: Sendable {
         if retainedBody.isEmpty {
             retainedBody = bodyCandidates
             rejectedBoxes = splitEdgeRejectedBoxes
+            marginCandidates = peripheralOrSmall
         }
 
         var mainBodyBox = retainedBody[0].exactBounds
@@ -390,7 +443,8 @@ public struct ContentBoxDetector: Sendable {
         let pageCenterX = width / 2
         let centerBandHalfW = max(width / 6, mainBodyBox.width / 2)
 
-        for cluster in peripheralOrSmall {
+        let strictVertGap = max(2 * brickH, Int((Double(mainBodyBox.height) * configuration.strictMarginGapFraction).rounded()))
+        for cluster in marginCandidates {
             let box = cluster.exactBounds
             guard interiorRect.intersection(box) != nil else {
                 rejectedBoxes.append(box)
@@ -410,9 +464,23 @@ public struct ContentBoxDetector: Sendable {
                 vDist = 0
             }
 
-            let plausibleHeaderOrPageNumber = (withinBodyColumns || nearPageCenterHorizontally)
-                && vDist <= maxVertGap
-                && cluster.foregroundPixels >= max(4, minClusterPx / 4)
+            let plausibleHeaderOrPageNumber: Bool
+            if strict {
+                // The page may sit anywhere in a camera slice, so "centered" means under the body, not the slice.
+                let area = max(1, box.width * box.height)
+                let isLineArt = cluster.foregroundPixels * 100 < area * 8 && (box.width >= 4 * brickW || box.height >= 4 * brickH)
+                let underBody = centerX >= mainBodyBox.minX && centerX <= mainBodyBox.maxX
+                // Headers, footers and page numbers are horizontal type; a tall sliver is a crease or an edge.
+                plausibleHeaderOrPageNumber = !isLineArt
+                    && box.height <= 2 * box.width
+                    && (withinBodyColumns || underBody)
+                    && vDist <= strictVertGap
+                    && cluster.foregroundPixels >= max(4, minClusterPx / 4)
+            } else {
+                plausibleHeaderOrPageNumber = (withinBodyColumns || nearPageCenterHorizontally)
+                    && vDist <= maxVertGap
+                    && cluster.foregroundPixels >= max(4, minClusterPx / 4)
+            }
 
             if plausibleHeaderOrPageNumber {
                 retainedAll.append(cluster)
@@ -450,6 +518,12 @@ public struct ContentBoxDetector: Sendable {
             }
         }
 
+        // Line art removed outside the content box is reported as rejected (rules removed inside it are not noise).
+        for box in lineArt {
+            let inside = box.intersection(finalContentBox).map { $0.width * $0.height } ?? 0
+            if inside * 2 < box.width * box.height { rejectedBoxes.append(box) }
+        }
+
         let retainedMass = retainedAll.reduce(0) { $0 + $1.foregroundPixels }
         let rejectedMass = allClusters.reduce(0) { $0 + $1.foregroundPixels } - retainedMass
         let confidence: Double
@@ -467,6 +541,34 @@ public struct ContentBoxDetector: Sendable {
             rejectedBoxes: rejectedBoxes,
             confidence: confidence
         )
+    }
+
+    /// Box of the text block: clusters of `bitmap` closed with a `brickWidth × brickHeight` brick, grown from the
+    /// heaviest by those with at least 10 % of its ink that share at least half their rows with the block so far
+    /// (ink measured by the fine components centred in each).
+    static func textBlock(_ bitmap: borrowing BinaryBitmap, fine: [ConnectedComponent], brickWidth: Int, brickHeight: Int) -> Rect2I? {
+        let closed = BinaryMorphology.closeBrick(bitmap, width: brickWidth, height: brickHeight)
+        let blocks = ConnectedComponentAnalyzer.extractComponents(from: closed, connectivity: .eight)
+        guard !blocks.isEmpty else { return nil }
+        var mass = [Int](repeating: 0, count: blocks.count)
+        for component in fine {
+            let center = Point2I(
+                x: component.boundingBox.minX + component.boundingBox.width / 2,
+                y: component.boundingBox.minY + component.boundingBox.height / 2
+            )
+            if let index = blocks.firstIndex(where: { $0.boundingBox.contains(center) }) { mass[index] += component.pixelCount }
+        }
+        guard let peak = mass.max(), peak > 0, let first = mass.firstIndex(of: peak) else { return nil }
+        // Grow from the heaviest block by further text columns, which share its rows. Anything above or below
+        // that the tall brick did not already fuse in (a mug on the desk, a distant footnote) is left to the
+        // header and footer rules.
+        var box = blocks[first].boundingBox
+        for index in mass.indices.sorted(by: { mass[$0] > mass[$1] }) where index != first && mass[index] * 10 >= peak {
+            let b = blocks[index].boundingBox
+            let rows = min(b.maxY, box.maxY) - max(b.minY, box.minY)
+            if rows * 2 >= b.height { box = box.union(b) }
+        }
+        return box
     }
 
     /// Pass 2 Book-Wide Outlier Rejection:

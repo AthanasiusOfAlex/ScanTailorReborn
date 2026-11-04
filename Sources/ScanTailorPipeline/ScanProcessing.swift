@@ -261,7 +261,15 @@ extension BookPipelineCoordinator {
             rectifySourcePage(unrectified, sourcePageIndex: job.index, priorRecord: job.priorGeometry, targetPageSize: context.effectivePageSize)
         }
         // 0b. Residual desk/background masking.
-        let (rawScan, geometry) = clock.measure("pass1.deskMask") { maskDeskOfSourcePage(rectified, record: rectificationRecord) }
+        var (rawScan, geometry) = clock.measure("pass1.deskMask") { maskDeskOfSourcePage(rectified, record: rectificationRecord) }
+        // 0b'. A camera photo: crop to the paper outline, traced on the photo before masking painted the desk over.
+        let cameraOutline = geometry.looksLikeCameraPhoto
+            ? clock.measure("pass1.cameraOutline") { CameraGutterLocator.Outline(photo: rectified) }
+            : nil
+        if let cameraOutline, let (cropped, result) = clock.measure("pass1.cameraOutline", { CameraPaperMasker.mask(rawScan, outline: cameraOutline) }) {
+            rawScan = cropped
+            geometry.cameraPaperMask = result
+        }
 
         // 0c. Spread split.
         let (splitDecision, slices) = clock.measure("pass1.split") { () -> (PageSplitDecision, [SplitPageSlice]) in
@@ -274,6 +282,10 @@ extension BookPipelineCoordinator {
                     splitLine: GutterSplitLine(centerX: centerX, normalizedCenterX: centerX / Double(max(1, rawScan.width))),
                     confidence: 1.0
                 )
+            } else if let cameraOutline,
+                      let camera = PageSplitEstimator.estimateCameraSplit(outline: cameraOutline, mode: job.splitMode) {
+                // A camera photo: cut at the fold of the paper outline.
+                decision = camera
             } else {
                 decision = PageSplitEstimator.estimateSplit(in: rawScan, mode: job.splitMode)
             }
@@ -379,8 +391,15 @@ extension BookPipelineCoordinator {
         }
 
         // 1c. Automatic content box detection (edits from the adjustments file are applied later).
-        let detection = clock.measure("pass1.contentBox") {
-            context.contentDetector.detect(in: finalCleaned, dpi: configuration.processingDPI, splitSide: side)
+        let detection = clock.measure("pass1.contentBox") { () -> ContentBoxDetector.DetectionResult in
+            var detector = context.contentDetector
+            if geometry.looksLikeCameraPhoto {
+                // Desk residue survives in a photo's margins: keep only the body and headers set tight against it.
+                var strict = detector.configuration
+                strict.strictMargins = true
+                detector = ContentBoxDetector(configuration: strict)
+            }
+            return detector.detect(in: finalCleaned, dpi: configuration.processingDPI, splitSide: side)
         }
 
         // 1d. Blank check: run on every low-ink page; whether it prunes depends on the page's edits.

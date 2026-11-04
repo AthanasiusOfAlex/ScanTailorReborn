@@ -519,6 +519,36 @@ public struct PageSplitEstimator: Sendable {
         return PageSplitDecision(layoutType: .singlePage, splitLine: nil, confidence: 0.85)
     }
 
+    /// Splits a camera photo of an open book at the fold found by ``CameraGutterLocator``.
+    ///
+    /// The cut is a vertical line. Returns `nil` when `mode` is `.singlePage`, when an automatic photo is too
+    /// narrow to hold two pages, or when the locator finds no clear gutter; callers then fall back to
+    /// ``estimateSplit(in:mode:configuration:)``.
+    /// - Parameters:
+    ///   - outline: The paper outline of the photo, traced before desk masking.
+    ///   - mode: Split policy.
+    ///   - configuration: Supplies the minimum two-page aspect ratio.
+    public static func estimateCameraSplit(
+        outline: CameraGutterLocator.Outline,
+        mode: PageSplitMode = .automatic,
+        configuration: Configuration = Configuration()
+    ) -> PageSplitDecision? {
+        let size = outline.photoSize
+        guard mode != .singlePage, size.height > 0 else { return nil }
+        if mode == .automatic && Double(size.width) / Double(size.height) < configuration.minimumTwoPageAspectRatio { return nil }
+        guard let gutter = CameraGutterLocator.locate(in: outline) else { return nil }
+        let confidence: Double
+        switch gutter.evidence {
+        case .gapAndNotch: confidence = 0.9
+        case .singleGap, .notchOnly: confidence = 0.75
+        }
+        return PageSplitDecision(
+            layoutType: .twoPageSpread,
+            splitLine: GutterSplitLine(centerX: gutter.centerX, normalizedCenterX: gutter.normalizedCenterX),
+            confidence: confidence
+        )
+    }
+
     /// Splits `buffer` into one (`.single`) or two (`.leftVerso`, `.rightRecto`) page slices.
     ///
     /// - Parameters:

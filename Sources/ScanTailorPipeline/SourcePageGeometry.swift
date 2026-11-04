@@ -50,6 +50,9 @@ public struct SourcePageGeometryRecord: Sendable, Equatable, Codable {
     public var deskMask: DeskMaskResult?
     /// Optional user override carried forward from the input manifest.
     public var manualOverride: SourcePageGeometryOverride?
+    /// Crop of a camera photo to its paper outline (`nil` unless the page looks like a camera photo and the
+    /// outline was trusted).
+    public var cameraPaperMask: CameraPaperMaskResult?
 
     public init(
         sourcePageIndex: Int,
@@ -58,7 +61,8 @@ public struct SourcePageGeometryRecord: Sendable, Equatable, Codable {
         rectified: Bool,
         plan: RectificationPlan?,
         deskMask: DeskMaskResult? = nil,
-        manualOverride: SourcePageGeometryOverride? = nil
+        manualOverride: SourcePageGeometryOverride? = nil,
+        cameraPaperMask: CameraPaperMaskResult? = nil
     ) {
         self.sourcePageIndex = sourcePageIndex
         self.rasterSize = rasterSize
@@ -67,10 +71,11 @@ public struct SourcePageGeometryRecord: Sendable, Equatable, Codable {
         self.plan = plan
         self.deskMask = deskMask
         self.manualOverride = manualOverride
+        self.cameraPaperMask = cameraPaperMask
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sourcePageIndex, rasterSize, detection, rectified, plan, deskMask, manualOverride
+        case sourcePageIndex, rasterSize, detection, rectified, plan, deskMask, manualOverride, cameraPaperMask
     }
 
     public init(from decoder: any Decoder) throws {
@@ -82,6 +87,7 @@ public struct SourcePageGeometryRecord: Sendable, Equatable, Codable {
         self.plan = try c.decodeIfPresent(RectificationPlan.self, forKey: .plan)
         self.deskMask = try c.decodeIfPresent(DeskMaskResult.self, forKey: .deskMask)
         self.manualOverride = try c.decodeIfPresent(SourcePageGeometryOverride.self, forKey: .manualOverride)
+        self.cameraPaperMask = try c.decodeIfPresent(CameraPaperMaskResult.self, forKey: .cameraPaperMask)
     }
 }
 
@@ -177,6 +183,21 @@ extension BookPipelineCoordinator {
 }
 
 extension SourcePageGeometryRecord {
+    /// `true` for a camera photo of a book lying on a desk: the page was not rectified, and either a large
+    /// desk area was masked, or the corner detector gave up on a paper region well short of the frame while the
+    /// desk masker saw a sharp paper edge but declined for its own limits (`noPaper`, `coverageCapExceeded`).
+    ///
+    /// Flatbed scans fill the frame (their rejected candidates cover 90 % of it or more), and a lighting gradient
+    /// has no sharp edge (`noSharpBoundary`), so neither qualifies.
+    var looksLikeCameraPhoto: Bool {
+        guard !rectified else { return false }
+        if deskMask?.mode == .full { return true }
+        guard let detection, detection.outcome == .rejected,
+              detection.areaFraction > 0, detection.areaFraction < 0.85 else { return false }
+        guard let deskMask else { return true }   // masking turned off: the detector alone decides
+        return deskMask.flags.contains { $0 == "skipped:noPaper" || $0 == "skipped:coverageCapExceeded" }
+    }
+
     /// Builds the engagement context for the macro-cluster border fallback of one output slice.
     ///
     /// The fallback runs only when upstream telemetry is marginal: a rejected or low-confidence
