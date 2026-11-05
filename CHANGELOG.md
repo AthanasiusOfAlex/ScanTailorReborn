@@ -77,13 +77,13 @@ To eliminate these deficiencies, a 3-phase architectural overhaul was planned, e
 
 #### Substep 1.1: Recalibrate `SkewEstimator` Confidence Metric
 - **Problem**: `(ratio - 1.0) / 4.0` was overly conservative. Normal text projection peaks ($2.1\times$ median energy) yielded $0.275$, clamped to $0.50$ by `BookPipelineCoordinator`, causing 100% false-positive warnings.
-- **Solution**: Recalibrated the denominator from `4.0` down to `1.5` in [SkewEstimator.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCore/Deskew/SkewEstimator.swift):
+- **Solution**: Recalibrated the denominator from `4.0` down to `1.5` in [SkewEstimator.swift](Sources/ScanTailorCore/Deskew/SkewEstimator.swift):
   $$\text{confidence} = \min\left(1.0, \max\left(0.0, \frac{\text{ratio} - 1.0}{1.5}\right)\right)$$
 - **Result**: Clean text pages now evaluate to confidence $\ge 0.75$, completely eliminating false-positive warnings on straight documents.
 
 #### Substep 1.2: PDF Font Stream Deduplication via Text Matrix Scaling
 - **Problem**: `ApplePDFDocumentWriter` instantiated dynamic `CTFont` sizes for each text observation, forcing Quartz `CGPDFContext` to embed 28+ distinct TrueType font subsets and bloating output PDFs to 5.3 MB.
-- **Solution**: Refactored [ApplePDFDocumentWriter.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorAppleBackend/ApplePDFDocumentWriter.swift) to instantiate a single canonical 12 pt base font once per document. Individual text observations compute uniform horizontal and vertical scale factors applied directly via `CGContext.textMatrix` and `CGAffineTransform`.
+- **Solution**: Refactored [ApplePDFDocumentWriter.swift](Sources/ScanTailorAppleBackend/ApplePDFDocumentWriter.swift) to instantiate a single canonical 12 pt base font once per document. Individual text observations compute uniform horizontal and vertical scale factors applied directly via `CGContext.textMatrix` and `CGAffineTransform`.
 - **Result**: Flannery output PDF file size dropped from **5.3 MB down to 1.4 MB** (a **73.6% size reduction**), exactly matching raw 1-bit CCITT Group 4 raster stream size.
 
 ---
@@ -91,22 +91,22 @@ To eliminate these deficiencies, a 3-phase architectural overhaul was planned, e
 ### Phase 2: Spine Crease, Gutter & Content Filtering & Margins
 
 #### Substep 2.1: Dual-Mode Gutter Detection & Dark Crease Centerline Tracking
-- **Problem**: In [PageSplitEstimator.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCore/Layout/PageSplitEstimator.swift), `meanCorridorInk * 3.5` penalized dark spine seams, displacing the cut line into adjacent white margins.
+- **Problem**: In [PageSplitEstimator.swift](Sources/ScanTailorCore/Layout/PageSplitEstimator.swift), `meanCorridorInk * 3.5` penalized dark spine seams, displacing the cut line into adjacent white margins.
 - **Solution**: Added vertical continuity analysis ($\ge 75\%$ dark pixel continuity along candidate columns). When continuous vertical ink is present, the estimator automatically switches from **White Valley Mode** to **Dark Crease Mode**. In Dark Crease Mode, corridor ink is **maximized** rather than penalized, locking onto the dark crease midline across tilt angles $\phi \in [-3.0^\circ, +3.0^\circ]$.
 
 #### Substep 2.2: Central Gutter Strip Trimming (Physical Crease Cutout)
 - **Problem**: Zero-width knife splitting left narrow dark crease bands along inner page boundaries.
-- **Solution**: Introduced configurable gutter strip trimming (`--gutter-trim-width <px>`, default: 24 px at 600 DPI) in [PageSplitEstimator.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCore/Layout/PageSplitEstimator.swift) and [BookPipelineCoordinator.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorPipeline/BookPipelineCoordinator.swift). Left sub-pages clip at $X_{\text{split}} - W_{\text{gutter}} / 2$ and right sub-pages start at $X_{\text{split}} + W_{\text{gutter}} / 2$, physically cutting out dark spine shadow strips at the slicing stage.
+- **Solution**: Introduced configurable gutter strip trimming (`--gutter-trim-width <px>`, default: 24 px at 600 DPI) in [PageSplitEstimator.swift](Sources/ScanTailorCore/Layout/PageSplitEstimator.swift) and [BookPipelineCoordinator.swift](Sources/ScanTailorPipeline/BookPipelineCoordinator.swift). Left sub-pages clip at $X_{\text{split}} - W_{\text{gutter}} / 2$ and right sub-pages start at $X_{\text{split}} + W_{\text{gutter}} / 2$, physically cutting out dark spine shadow strips at the slicing stage.
 
 #### Substep 2.3: Split-Boundary Noise Exclusion in `ContentBoxDetector`
 - **Problem**: Residual crease ink bridged into body text during morphological closing (`closeBrick(64, 14)`), expanding content boxes to $x = 2..4\text{ px}$.
-- **Solution**: Added `splitEdgeExclusionFraction = 0.04` (4% of slice width) in [ContentBoxDetector.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCore/Layout/ContentBoxDetector.swift). On sliced sub-pages (`.leftVerso` inner right margin, `.rightRecto` inner left margin), a directional boundary mask clears ink along the cut margin prior to morphological closing, disconnecting crease remnants and ensuring they are filtered as noise.
+- **Solution**: Added `splitEdgeExclusionFraction = 0.04` (4% of slice width) in [ContentBoxDetector.swift](Sources/ScanTailorCore/Layout/ContentBoxDetector.swift). On sliced sub-pages (`.leftVerso` inner right margin, `.rightRecto` inner left margin), a directional boundary mask clears ink along the cut margin prior to morphological closing, disconnecting crease remnants and ensuring they are filtered as noise.
 
 #### Substep 2.4: Blank Sub-Page Auto-Pruning & Layout Outlier Filtering
 - **Problem**: Single title pages or oversize foldouts caused blank phantom pages (Vermeersch Page 1) and distorted canonical canvas dimensions.
 - **Solution**:
-  - Implemented automatic pruning in [BookPipelineCoordinator.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorPipeline/BookPipelineCoordinator.swift): sub-page slices with foreground ink density $< 0.5\%$ and 0 recognized OCR words are automatically discarded.
-  - Added interquartile range (IQR) outlier rejection in [MarginHarmonizer.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCore/Layout/MarginHarmonizer.swift) to exclude anomalous page dimensions from canonical frame calculations.
+  - Implemented automatic pruning in [BookPipelineCoordinator.swift](Sources/ScanTailorPipeline/BookPipelineCoordinator.swift): sub-page slices with foreground ink density $< 0.5\%$ and 0 recognized OCR words are automatically discarded.
+  - Added interquartile range (IQR) outlier rejection in [MarginHarmonizer.swift](Sources/ScanTailorCore/Layout/MarginHarmonizer.swift) to exclude anomalous page dimensions from canonical frame calculations.
 
 #### Substep 2.5: Publication Margin Engine & CLI Configuration
 - **Problem**: Hardcoded margins lacked flexibility for print-on-demand publishing and binding clearance.
@@ -124,21 +124,21 @@ To eliminate these deficiencies, a 3-phase architectural overhaul was planned, e
 #### Substep 3.1: Swift 6 `libtesseract` C Bridging & `TesseractOCREngine`
 - **Problem**: Scholarly texts with Polytonic Ancient Greek or German Fraktur could not be recognized by Apple Vision.
 - **Solution**:
-  - Created [CTesseract](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/CTesseract/include/CTesseract.h) bridging `tesseract/capi.h` and `leptonica/allheaders.h`.
+  - Created [CTesseract](Sources/CTesseract/include/ctesseract.h) bridging `tesseract/capi.h` and `leptonica/allheaders.h`.
   - Built `LeptonicaPix` memory-safe RAII wrapper for zero-leak `PIX*` lifecycle management.
-  - Implemented [TesseractOCREngine](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorTesseractBackend/TesseractOCREngine.swift) conforming to `OCREngine: Sendable` with complete coordinate space inversion (transforming bottom-left Leptonica pixel boxes to top-left ScanTailor canvas space) and multi-language support (`grc`, `deu_frak`/`frk`, `lat`, `eng`).
+  - Implemented [TesseractOCREngine](Sources/ScanTailorTesseractBackend/TesseractOCREngine.swift) conforming to `OCREngine: Sendable` with complete coordinate space inversion (transforming bottom-left Leptonica pixel boxes to top-left ScanTailor canvas space) and multi-language support (`grc`, `deu_frak`/`frk`, `lat`, `eng`).
 
 #### Substep 3.2: Pipeline Multi-Engine Dispatch & `DualOCREngine` Synthesis
 - **Problem**: Running either Apple Vision or Tesseract alone forces a compromise between Apple Vision's superior Latin/layout neural model and Tesseract's classical script capability.
 - **Solution**:
-  - Implemented [DualOCREngine](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorPipeline/OCR/DualOCREngine.swift) supporting concurrent synthesis:
+  - Implemented [DualOCREngine](Sources/ScanTailorPipeline/OCR/DualOCREngine.swift) supporting concurrent synthesis:
     1. **Spatial Bounding Box Merging**: Merges detections with vertical overlap ratio $> 0.40$ and horizontal overlap ratio $> 0.30$.
     2. **Classical Script Prioritization**: Detections containing Polytonic Greek (`U+0370...U+03FF`, `U+1F00...U+1FFF`) or Fraktur long s (`ſ`) unconditionally supersede Latin misrecognitions.
     3. **Confidence Differential Arbitration**: Favors detections with confidence differential $> 0.15$.
     4. **Unique Retention**: Retains non-overlapping words identified by either engine.
     5. **Apple Vision Language Filtering**: Strips classical language codes (`grc`, `deu_frak`, `frk`, `lat`) prior to calling Apple Vision, avoiding unsupported language errors.
     6. **Reading Order Sorting**: Emits observations sorted geometrically top-to-bottom, left-to-right.
-  - Wired CLI flags in [ScanTailorCLI.swift](file:///Users/louismelahn/Antigravity/ScanTailorReborn/Sources/ScanTailorCLI/ScanTailorCLI.swift): `--ocr-engine <apple|tesseract|dual>`, `--ocr-languages <langs>` (aliases: `--languages`, `--ocr-lang`), and `--tessdata-dir <path>`.
+  - Wired CLI flags in [ScanTailorCLI.swift](Sources/ScanTailorCLI/ScanTailorCLI.swift): `--ocr-engine <apple|tesseract|dual>`, `--ocr-languages <langs>` (aliases: `--languages`, `--ocr-lang`), and `--tessdata-dir <path>`.
 
 ---
 
@@ -215,3 +215,8 @@ Phases 4–7 took the pipeline from flatbed scans to smartphone photographs of b
 - Cover handling (`--cover-handling`), end-only blank pruning, consensus split, kept blank pages laid out blank, page-edge stacks and content-overflow re-judging.
 - README rewritten against `--help`; the `scantailor-reborn` agent skill and Claude Code plugin.
 - **Executable renamed** from `scantailor-cli` to `scantailor-reborn-cli`, to avoid a clash with the original Scan Tailor.
+- Tagged `v1.0.0`; Homebrew tap `AthanasiusOfAlex/scantailor-reborn` builds it from source.
+
+## 7. After v1.0.0
+
+- Documentation consolidated: the handoff notes, resume prompt and white paper are replaced by [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PIPELINE.md](docs/PIPELINE.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The old files remain in git history (up to commit `e861d06`).

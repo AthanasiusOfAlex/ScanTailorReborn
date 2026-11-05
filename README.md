@@ -25,7 +25,7 @@ It is an independent project inspired by Scan Tailor, not a fork of it. Its exec
 - Swift 6.0 toolchain (Xcode 16 or later)
 - Tesseract and Leptonica, for building and for the Tesseract OCR engine: `brew install tesseract`. For more languages: `brew install tesseract-lang`.
 
-### Homebrew (from v1.0.0)
+### Homebrew
 
 ```bash
 brew tap AthanasiusOfAlex/scantailor-reborn
@@ -47,9 +47,10 @@ cp .build/release/scantailor-reborn-cli /usr/local/bin/    # optional
 ### Tests
 
 ```bash
-scripts/test.sh fast      # quick suite
-swift test                # everything
+scripts/test.sh fast      # whole suite in release, about a minute
 ```
+
+The [development guide](docs/DEVELOPMENT.md) covers the debug suite and the opt-in tests that read real books.
 
 ---
 
@@ -298,8 +299,9 @@ Sources/
 
 ## Documentation
 
-- [Handoff notes](docs/HANDOFF.md): how each stage works, with the decisions behind it.
-- [White paper](docs/WHITE_PAPER.md): goals, release criteria and the development plan.
+- [Architecture](docs/ARCHITECTURE.md): design rules, package layers, the passes, the manifest, cache and parallelism.
+- [Pipeline stages](docs/PIPELINE.md): how each stage works, with its defaults, the reasons behind them and its known limits.
+- [Development](docs/DEVELOPMENT.md): building, tests, the real-book corpus, the agent skill, releasing.
 - [Changelog](CHANGELOG.md)
 
 ## License

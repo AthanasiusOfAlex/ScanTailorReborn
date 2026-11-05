@@ -15,7 +15,7 @@ public enum RunningHeaderPolicy: String, Sendable, Equatable, Codable, CaseItera
 /// All coordinates are in the page's pass-1 coordinate frame at the processing DPI (after
 /// splitting, deskew, and dewarping, before canonical framing). The anchor is the running
 /// header's baseline when the page carries a recurring header, otherwise the baseline of the
-/// first body text line (WHITE_PAPER release criterion 4).
+/// first body text line (see docs/PIPELINE.md, section 11).
 public struct PageTopAnchor: Sendable, Equatable, Codable {
     /// What the anchor line is.
     public enum Kind: String, Sendable, Equatable, Codable {
