@@ -106,6 +106,7 @@ public struct ContentBoxDetector: Sendable {
             self.rejectedBoxes = rejectedBoxes
             self.confidence = min(max(0.0, confidence), 1.0)
         }
+
     }
 
     public let configuration: Configuration
@@ -243,6 +244,18 @@ public struct ContentBoxDetector: Sendable {
                 return !isLineArt
             }
         }
+
+        // Page-edge stack: the edges of the following leaves, seen past the page's outer edge, are a band of thin
+        // vertical lines that can carry as much ink as the text and fuse with it when closed, so the isolation
+        // check of step 4 cannot remove them. The band (see `edgeStackBands`) is erased before clustering; on a
+        // page that shows nothing else the page is then blank.
+        let edgeStackBoxes = Self.edgeStackBands(in: cleaned, splitSide: splitSide, scale: scale)
+        for band in edgeStackBoxes {
+            for y in 0..<height {
+                for x in band.minX..<band.maxX { cleaned[x, y] = false }
+            }
+        }
+        splitEdgeRejectedBoxes.append(contentsOf: edgeStackBoxes)
 
         // Extract fine connected components from the cleaned bitmap so we can compute exact bounds
         // and exact foreground pixel counts inside each morphologically fused cluster.
@@ -545,6 +558,67 @@ public struct ContentBoxDetector: Sendable {
             rejectedBoxes: rejectedBoxes,
             confidence: confidence
         )
+    }
+
+    /// Full-height column bands holding a page-edge stack, at most one per outer side: the left third of a verso,
+    /// the right third of a recto, either third of an unsplit page.
+    ///
+    /// The leaf edges are found in horizontal strips 0.5 in tall, so lines that meet at the foot or head of the
+    /// stack still count one by one: a piece spans at least 80 % of its strip and is four times as tall as wide (a
+    /// leaf edge or the board's dark edge; no glyph is that tall). A band qualifies when its pieces cover 40 % of the
+    /// page height, average one and a half parallel lines per strip (one rule beside the text is not a stack), make
+    /// it no wider than a quarter of the page, and carry at least half of its ink (ruled tables have more text than
+    /// rules; broken leaf edges are the rest). The band then grows over broken leaf edges (slivers at least 0.2 in
+    /// tall and four times as tall as wide, within 0.15 in of it and in the same outer third) and is widened by
+    /// 0.05 in on each side.
+    static func edgeStackBands(in bitmap: borrowing BinaryBitmap, splitSide: PageSide, scale: Double) -> [Rect2I] {
+        let width = bitmap.width
+        let height = bitmap.height
+        let stripHeight = max(20, Int((300.0 * scale).rounded()))
+        let minPiece = stripHeight * 4 / 5
+        let pad = max(2, Int((30.0 * scale).rounded()))
+        let minSliver = max(8, Int((120.0 * scale).rounded()))
+        let sliverReach = max(4, Int((90.0 * scale).rounded()))
+        var pieces: [(box: Rect2I, pixels: Int, strip: Int)] = []
+        var slivers: [Rect2I] = []
+        var strip = 0
+        while strip * stripHeight + minPiece <= height {
+            let rect = Rect2I(minX: 0, minY: strip * stripHeight, maxX: width, maxY: min(height, (strip + 1) * stripHeight))
+            for c in ConnectedComponentAnalyzer.extractComponents(from: bitmap.cropped(to: rect), connectivity: .eight) {
+                let b = c.boundingBox
+                guard b.height >= 4 * b.width, b.height >= minSliver else { continue }
+                slivers.append(Rect2I(x: b.minX, y: rect.minY + b.minY, width: b.width, height: b.height))
+                guard b.height >= minPiece else { continue }
+                pieces.append((Rect2I(x: b.minX, y: rect.minY + b.minY, width: b.width, height: b.height), c.pixelCount, strip))
+            }
+            strip += 1
+        }
+        var sides: [(Rect2I) -> Bool] = []
+        if splitSide != .rightRecto { sides.append { ($0.minX + $0.width / 2) * 3 < width } }
+        if splitSide != .leftVerso { sides.append { ($0.minX + $0.width / 2) * 3 > 2 * width } }
+        return sides.compactMap { onSide -> Rect2I? in
+            let side = pieces.filter { onSide($0.box) }
+            let strips = Set(side.map(\.strip)).count
+            guard let first = side.first, strips * stripHeight * 5 >= height * 2, 2 * side.count >= 3 * strips else { return nil }
+            var band = side.dropFirst().reduce(first.box) { $0.union($1.box) }
+            guard band.width * 4 <= width else { return nil }
+            let strokeInk = side.reduce(0) { $0 + $1.pixels }
+            var bandInk = 0
+            for y in 0..<height {
+                for x in band.minX..<band.maxX where bitmap[x, y] { bandInk += 1 }
+            }
+            guard bandInk <= 2 * strokeInk else { return nil }
+            var grown = true
+            while grown {
+                grown = false
+                for s in slivers where onSide(s) && (s.maxX > band.maxX && s.minX <= band.maxX + sliverReach
+                    || s.minX < band.minX && s.maxX >= band.minX - sliverReach) {
+                    band = band.union(s)
+                    grown = true
+                }
+            }
+            return Rect2I(minX: max(0, band.minX - pad), minY: 0, maxX: min(width, band.maxX + pad), maxY: height)
+        }
     }
 
     /// Box of the text block: clusters of `bitmap` closed with a `brickWidth × brickHeight` brick, grown from the

@@ -1774,6 +1774,24 @@ public struct BookPipelineCoordinator: Sendable {
             classifier = DimensionConsensus(configuration: consensusConfiguration)
         }
         var dimensionResult = classifier.classify(pages: dimensionInputs)
+        // A page whose only fault is a text block too large may owe it to a smudge or an edge texture beside the
+        // text: trim it to the book's text width as Pass 2 trims ordinary pages, and judge it again.
+        let overflowOnly = dimensionResult.records.indices.filter { i in
+            dimensionResult.records[i].kinds == [.contentOverflow] && pass1Pages[i].manualOverride?.overrideContentBox == nil
+        }
+        if !overflowOnly.isEmpty {
+            let outliers = dimensionResult.outlierPageIndices
+            let canonicalInputs = harmonizerInputs.filter { !outliers.contains($0.pageIndex) }
+            let prior = harmonizer.canonicalWidthPrior(canonicalInputs.isEmpty ? harmonizerInputs : canonicalInputs)
+            var trimmedInputs = dimensionInputs
+            for i in overflowOnly {
+                let refined = contentDetector.refineWithCanonicalWidthPrior(
+                    pass1Pages[i].detection, canonicalWidth: prior,
+                    maxWidthExcessFraction: harmonizer.configuration.pass2OutlierWidthExcessFraction)
+                trimmedInputs[i].contentBox = refined.contentBox
+            }
+            if trimmedInputs != dimensionInputs { dimensionResult = classifier.classify(pages: trimmedInputs) }
+        }
         dimensionResult.summary.splitVetoedSourcePages = splitVetoedSources.sorted()
         dimensionResult.summary.splitByConsensusSourcePages = consensusSplitSources
         var outlierCanvasSizes: [Int: Size2I] = [:]

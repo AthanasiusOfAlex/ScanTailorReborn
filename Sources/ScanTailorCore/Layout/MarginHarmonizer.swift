@@ -251,6 +251,29 @@ public struct MarginHarmonizer: Sendable {
         self.configuration = configuration
     }
 
+    /// The book's body text width that Pass 2 trims wider pages to (before the allowed excess): the explicit
+    /// `--content-box-size` width, or the 75th percentile of the IQR-filtered widths of the pages' content boxes,
+    /// leaving out boxes narrower than 35 % of the median page width when there are wider ones.
+    /// - Parameter pages: The pages that share the book's size (dimensional outliers left out).
+    /// - Returns: The width in pixels at the pages' DPI.
+    public func canonicalWidthPrior(_ pages: [PageInput]) -> Int {
+        guard let first = pages.first else { return 1 }
+        let referenceDPI = max(72, first.dpi)
+        if let explicitBox = configuration.targetContentBoxSize?.sizeInPixels(atDPI: referenceDPI) {
+            return max(1, explicitBox.width)
+        }
+        let rawBoxes = pages.compactMap(\.detection.contentBox).filter { !$0.isEmpty }
+        let medianPageWidth = Self.percentileInt(pages.map(\.pageSize.width), p: 0.50) ?? first.pageSize.width
+        let substantialWidths = rawBoxes.map(\.width).filter { $0 >= medianPageWidth * 35 / 100 }
+        let widthSamplesForPrior = substantialWidths.isEmpty ? rawBoxes.map(\.width) : substantialWidths
+        let filteredWidthSamples = Self.filterOutliersIQR(
+            widthSamplesForPrior,
+            maxDeviationFraction: configuration.canonicalDimensionOutlierToleranceFraction,
+            iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
+        )
+        return Self.percentileInt(filteredWidthSamples, p: 0.75) ?? (medianPageWidth * 70 / 100)
+    }
+
     /// Performs Pass 2 book-wide statistical outlier rejection, estimates canonical text frames,
     /// and classifies & positions every page according to the 3-tier layout policy.
     ///
@@ -318,25 +341,9 @@ public struct MarginHarmonizer: Sendable {
         let canonicalCandidates = pages.filter { !dimensionOutliers.contains($0.pageIndex) }
         let outlierSet: Set<Int> = canonicalCandidates.count >= minimumCanonicalPages ? dimensionOutliers : []
         let statPages = outlierSet.isEmpty ? pages : canonicalCandidates
-        let rawBoxes = statPages.compactMap(\.detection.contentBox).filter { !$0.isEmpty }
         let medianPageWidth = Self.percentileInt(statPages.map(\.pageSize.width), p: 0.50) ?? pages[0].pageSize.width
         let medianPageHeight = Self.percentileInt(statPages.map(\.pageSize.height), p: 0.50) ?? pages[0].pageSize.height
-
-        let priorCanonicalWidth: Int
-        if let explicitBox = explicitContentBoxSize {
-            priorCanonicalWidth = max(1, explicitBox.width)
-        } else {
-            // Filter out tiny standalone boxes (e.g., < 35% of page width) when computing the body-width prior
-            // if substantial body pages exist.
-            let substantialWidths = rawBoxes.map(\.width).filter { $0 >= medianPageWidth * 35 / 100 }
-            let widthSamplesForPrior = substantialWidths.isEmpty ? rawBoxes.map(\.width) : substantialWidths
-            let filteredWidthSamples = Self.filterOutliersIQR(
-                widthSamplesForPrior,
-                maxDeviationFraction: configuration.canonicalDimensionOutlierToleranceFraction,
-                iqrMultiplier: configuration.canonicalDimensionIQROutlierMultiplier
-            )
-            priorCanonicalWidth = Self.percentileInt(filteredWidthSamples, p: 0.75) ?? (medianPageWidth * 70 / 100)
-        }
+        let priorCanonicalWidth = canonicalWidthPrior(statPages)
 
         // Step 2: Run Pass 2 outlier refinement on any page whose raw content box exceeds
         // priorCanonicalWidth * (1 + pass2OutlierWidthExcessFraction).
