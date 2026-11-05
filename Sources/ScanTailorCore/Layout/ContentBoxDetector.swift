@@ -303,6 +303,9 @@ public struct ContentBoxDetector: Sendable {
         }
 
         let minClusterPx = max(4, Int((Double(configuration.minClusterForegroundPixelsAt600DPI) * areaScale).rounded()))
+        // A speck (dust, a stray dot) is smaller than any glyph: its longer side is under 0.06 in. Specks never
+        // set the content box; a lone dot of a line merges with its line when the clusters are closed.
+        let minSpeckSpan = max(4, Int((36.0 * scale).rounded()))
         let edgeMarginX = Int((Double(width) * configuration.outerEdgeMarginFraction).rounded())
         let edgeMarginY = Int((Double(height) * configuration.outerEdgeMarginFraction).rounded())
         let leftEdgeMarginX = (splitSide == .rightRecto) ? max(edgeMarginX, splitExclusionWidth) : edgeMarginX
@@ -333,7 +336,8 @@ public struct ContentBoxDetector: Sendable {
             let centerY = box.minY + box.height / 2
             let centerInInterior = interiorRect.contains(x: centerX, y: centerY)
 
-            if !isTallThinBorderLine && isInInterior && centerInInterior && cluster.foregroundPixels >= minClusterPx {
+            if !isTallThinBorderLine && isInInterior && centerInInterior && cluster.foregroundPixels >= minClusterPx
+                && max(box.width, box.height) >= minSpeckSpan {
                 bodyCandidates.append(cluster)
             } else {
                 peripheralOrSmall.append(cluster)
@@ -446,7 +450,7 @@ public struct ContentBoxDetector: Sendable {
         let strictVertGap = max(2 * brickH, Int((Double(mainBodyBox.height) * configuration.strictMarginGapFraction).rounded()))
         for cluster in marginCandidates {
             let box = cluster.exactBounds
-            guard interiorRect.intersection(box) != nil else {
+            guard interiorRect.intersection(box) != nil, max(box.width, box.height) >= minSpeckSpan else {
                 rejectedBoxes.append(box)
                 continue
             }

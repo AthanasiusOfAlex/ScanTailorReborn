@@ -774,6 +774,7 @@ public struct ScanTailorCLI {
                 let indices = flaggedPages.map { String($0.outputPageIndex + 1) }.joined(separator: ", ")
                 print("WARNING: \(flaggedPages.count) page(s) had confidence below threshold: [\(indices)]")
             }
+            printReviewSummary(result.manifest)
             return
         }
         print("Completed: wrote \(result.manifest.pages.count) page(s) at \(result.manifest.outputDPI) DPI to \(outputURL.path)")
@@ -781,6 +782,14 @@ public struct ScanTailorCLI {
             let indices = flaggedPages.map { String($0.outputPageIndex + 1) }.joined(separator: ", ")
             print("WARNING: \(flaggedPages.count) page(s) had confidence below threshold: [\(indices)]")
         }
+        printReviewSummary(result.manifest)
+    }
+
+    /// One line naming the pages that need a look, with the command that explains why.
+    private static func printReviewSummary(_ manifest: BookProcessingManifest) {
+        let pages = reviewFindings(manifest).map { String($0.page) }
+        guard !pages.isEmpty else { return }
+        print("Pages to check (\(pages.count)): [\(pages.joined(separator: ", "))]. Reasons and adjustments-file entries: scantailor-cli inspect <manifest.json> --pages")
     }
 
     public static func executeInspect(_ args: [String]) throws {

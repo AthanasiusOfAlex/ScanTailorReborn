@@ -32,14 +32,28 @@ struct BenchmarkTests {
         var relativePath: String
         /// Names of checks that fail today (see ``Scorecard/Check/id``), with the substep expected to fix them.
         var knownFailing: [String: String]
+        /// A small adjustments file (JSON, as for `--apply-manifest`) for the pages automatic detection cannot settle.
+        /// When present the book is scored twice: automatically, and again with these adjustments, which must pass
+        /// every check (``Book/knownFailing`` applies to the automatic run only).
+        var adjustments: String? = nil
     }
 
     static let flannery = Book(name: "flannery.1993", relativePath: "flannery.1993/00-pdf-orig/flannery.1993.pdf", knownFailing: [:])
-    // Vermeersch content boxes take in gutter shadows and ink at the scan edges, so they overflow the frame and
-    // header pages cannot be lifted into line.
-    static let vermeersch = Book(name: "vermeersch.1934", relativePath: "vermeersch.1934/00-pdf-orig/vermeersch.1934.pdf", knownFailing: [
-        "canvas-hugs-text": "7.1.1c", "header-pages-top-aligned": "7.1.1c", "header-registration": "7.1.1c",
-    ])
+    // Vermeersch (7.1.1c): specks are ignored and recto headers recognized automatically. Scan 2 has halftone gutter
+    // shadow fused into its text on both halves; no rule separates it safely, so those two boxes are set by hand
+    // (rects from the diagnostic images: text extent in inches from the page's top-left corner). The title page
+    // (scan 1, blank left half) is a cover matter for 7.1.1d and is left out of `boxes-sane`.
+    static let vermeersch = Book(
+        name: "vermeersch.1934", relativePath: "vermeersch.1934/00-pdf-orig/vermeersch.1934.pdf",
+        knownFailing: ["boxes-sane": "manual boxes for s2L and s2R (adjustments file)"],
+        adjustments: """
+        { "version": 1,
+          "pages": {
+            "s2L": { "contentBox": { "rect": ["1.23in", "0.65in", "4.82in", "7.45in"] }, "_why": "halftone gutter shadow fused with the text at the right edge" },
+            "s2R": { "contentBox": { "rect": ["0.27in", "1.08in", "3.88in", "7.53in"] }, "_why": "halftone shadow along the left edge and top-left" }
+          } }
+        """
+    )
     // Camera photo, cropped to the paper, split at the fold, and each page scaled to the book's text block (7.1.1b).
     static let simpson = Book(name: "simpson.1968 (pp. 280-281)", relativePath: "simpson.1968/simpson.1968.280-281.pdf", knownFailing: [:])
 
@@ -50,6 +64,8 @@ struct BenchmarkTests {
             var passed: Bool
             var detail: String
         }
+        /// `automatic`, or `adjusted` (scored again with the book's adjustments file).
+        var variant: String
         var book: String
         var pages: Int
         var canonicalPages: Int
@@ -63,7 +79,7 @@ struct BenchmarkTests {
     static let sideMargin = 0.5
     static let topMargin = 0.25
 
-    static func run(_ book: Book, cache: PipelineCacheOptions) async throws -> (BookProcessingManifest, Double) {
+    static func run(_ book: Book, cache: PipelineCacheOptions, adjusted: Bool = false) async throws -> (BookProcessingManifest, Double) {
         let root = try #require(ProcessInfo.processInfo.environment["SCANTAILOR_CORPUS_DIR"])
         let url = URL(fileURLWithPath: root).appendingPathComponent(book.relativePath)
         try #require(FileManager.default.fileExists(atPath: url.path), "missing corpus file \(url.path)")
@@ -77,6 +93,9 @@ struct BenchmarkTests {
         configuration.stopAfter = .layout
         configuration.jobs = 4
         configuration.cache = cache
+        if adjusted, let json = book.adjustments {
+            configuration.adjustments = try PageAdjustments.parse(Data(json.utf8))
+        }
         let start = ContinuousClock.now
         let output = try await BookPipelineCoordinator(configuration: configuration).processBook(
             reader: reader, writer: writer, accelerator: MetalComputeAccelerator(), ocrEngine: nil
@@ -86,7 +105,7 @@ struct BenchmarkTests {
     }
 
     /// Scores a manifest against the layout rules (distances in inches).
-    static func score(_ book: Book, manifest m: BookProcessingManifest, cold: Double, warm: Double) -> Scorecard {
+    static func score(_ book: Book, manifest m: BookProcessingManifest, cold: Double, warm: Double, variant: String = "automatic") -> Scorecard {
         let dpi = Double(m.processingDPI)
         let isolated = Set(m.dimensionConsensus?.isolatedCanvasPages ?? [])
         let body = m.pages.filter { !isolated.contains($0.outputPageIndex) && $0.layoutPlan.sourceContentBox != nil }
@@ -129,7 +148,7 @@ struct BenchmarkTests {
         let headerPages = body.filter { $0.registration?.method == .header }
         let tops = headerPages.compactMap { margins($0)?.t }
         let topSpread = (tops.max() ?? 0) - (tops.min() ?? 0)
-        let topOK = tops.isEmpty || (topSpread <= 0.05 && abs((tops.min() ?? 0) - topMargin) <= marginTolerance)
+        let topOK = tops.isEmpty || (topSpread <= marginTolerance / 1.5 && abs((tops.min() ?? 0) - topMargin) <= marginTolerance)
         checks.append(.init(id: "header-pages-top-aligned", passed: topOK,
             detail: "\(headerPages.count) header pages, top margin \(f(tops.min() ?? 0))–\(f(tops.max() ?? 0)) in"))
 
@@ -147,11 +166,25 @@ struct BenchmarkTests {
         let sizeOK = (3...10).contains(w) && (4...13).contains(h) && !m.physicalScaleAmbiguous
         checks.append(.init(id: "physical-size", passed: sizeOK, detail: "canvas \(f(w))×\(f(h)) in; ambiguous: \(m.physicalScaleAmbiguous)"))
 
-        // 7. Criterion 10: the warm edit loop is fast (under a fifth of the cold run, or under 5 s).
+        // 7. No page's text block is far bigger than the book's typical one or touches the top of its scan: those are
+        //    gutter shadow and scan-edge ink taken for text (the pages `inspect --pages` lists under "Pages to check").
+        //    The first output page, a title page beside a blank half, belongs to the cover rules (7.1.1d).
+        let sized = m.pages.compactMap { p -> (PageProcessingRecord, Rect2I)? in p.layoutPlan.sourceContentBox.map { (p, $0) } }
+        func medianOf(_ values: [Int]) -> Double { values.isEmpty ? 0 : Double(values.sorted()[values.count / 2]) }
+        let typicalW = medianOf(body.compactMap { $0.layoutPlan.sourceContentBox?.width })
+        let typicalH = medianOf(body.compactMap { $0.layoutPlan.sourceContentBox?.height })
+        let oversized = sized.filter { page, box in
+            page.outputPageIndex > 0 && (Double(box.width) > 1.08 * typicalW || Double(box.height) > 1.08 * typicalH
+                || Double(box.minY) / dpi < 0.05)
+        }.map { "\($0.0.outputPageIndex + 1)" }
+        checks.append(.init(id: "boxes-sane", passed: oversized.isEmpty,
+            detail: oversized.isEmpty ? "no oversized boxes" : "oversized boxes on pages \(oversized.joined(separator: ", "))"))
+
+        // 8. Criterion 10: the warm edit loop is fast (under a fifth of the cold run, or under 5 s).
         checks.append(.init(id: "warm-run-fast", passed: warm < max(5, cold / 5), detail: "cold \(f(cold)) s, warm \(f(warm)) s"))
 
         return Scorecard(
-            book: book.name, pages: m.pages.count, canonicalPages: body.count,
+            variant: variant, book: book.name, pages: m.pages.count, canonicalPages: body.count,
             canvasInches: sizes.sorted(), coldSeconds: cold, warmSeconds: warm, checks: checks
         )
     }
@@ -167,6 +200,12 @@ struct BenchmarkTests {
         let (manifest, warmSeconds) = try await run(book, cache: cache)
         let card = score(book, manifest: manifest, cold: coldSeconds, warm: warmSeconds)
 
+        var adjustedCard: Scorecard? = nil
+        if book.adjustments != nil {
+            let (adjustedManifest, adjustedSeconds) = try await run(book, cache: cache, adjusted: true)
+            adjustedCard = score(book, manifest: adjustedManifest, cold: coldSeconds, warm: adjustedSeconds, variant: "adjusted")
+        }
+
         let outDir = ProcessInfo.processInfo.environment["SCANTAILOR_BENCHMARK_OUT"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.temporaryDirectory
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
@@ -174,15 +213,22 @@ struct BenchmarkTests {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let slug = book.name.split(separator: " ").first.map(String.init) ?? book.name
         try encoder.encode(card).write(to: outDir.appendingPathComponent("benchmark-\(slug).json"))
+        if let adjustedCard {
+            try encoder.encode(adjustedCard).write(to: outDir.appendingPathComponent("benchmark-\(slug)-adjusted.json"))
+        }
 
         for check in card.checks {
             if let fixedBy = book.knownFailing[check.id] {
-                withKnownIssue("\(check.id) fails until \(fixedBy): \(check.detail)") {
+                withKnownIssue("\(check.id) fails automatically until \(fixedBy): \(check.detail)") {
                     #expect(check.passed, "\(check.detail)")
                 }
             } else {
                 #expect(check.passed, "\(check.id): \(check.detail)")
             }
+        }
+        // With the adjustments file every check must pass: the manual route closes the gap.
+        for check in adjustedCard?.checks ?? [] {
+            #expect(check.passed, "adjusted \(check.id): \(check.detail)")
         }
     }
 

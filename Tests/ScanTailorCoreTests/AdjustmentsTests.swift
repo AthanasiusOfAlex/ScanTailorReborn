@@ -377,6 +377,31 @@ struct AdjustmentsTests {
         #expect(loaded.priorManifestPath == file.path && loaded.adjustments.isEmpty)
     }
 
+    @Test("inspect --pages: oversized boxes are listed under \"Pages to check\" with an adjustments entry; manual boxes are not")
+    func pagesToCheck() async throws {
+        let output = try await Self.run(Self.pipeline())
+        var manifest = output.manifest
+        #expect(ScanTailorCLI.reviewFindings(manifest).isEmpty, "\(ScanTailorCLI.reviewFindings(manifest))")
+        #expect(ScanTailorCLI.formatReview([]) == "Pages to check: none")
+
+        // Scan 4's box swallows a gutter shadow: much wider than its neighbours' and up against the top of the scan.
+        var box = try #require(manifest.pages[3].layoutPlan.sourceContentBox)
+        box = Rect2I(minX: box.minX - 200, minY: 2, maxX: box.maxX + 200, maxY: box.maxY)
+        manifest.pages[3].layoutPlan.sourceContentBox = box
+        let findings = ScanTailorCLI.reviewFindings(manifest)
+        let finding = try #require(findings.first, "\(findings)")
+        #expect(findings.count == 1 && finding.page == 4 && finding.scan == "s4")
+        #expect(finding.reasons.contains { $0.contains("wide") } && finding.reasons.contains { $0.contains("top edge") })
+        #expect(finding.suggestion?.contains("\"s4\": { \"contentBox\": { \"rect\"") == true, "\(finding)")
+        let text = ScanTailorCLI.formatReview(findings)
+        #expect(text.contains("Pages to check (1)") && text.contains("page 4 (s4)"), "\(text)")
+        #expect(ScanTailorCLI.formatPageTable(manifest).contains("page 4 (s4)"))
+
+        // Once a manual box is stored for the page, the box is no longer suspect.
+        manifest.pages[3].manualOverride = PageManualOverride(overrideContentBox: box)
+        #expect(ScanTailorCLI.reviewFindings(manifest).isEmpty)
+    }
+
     @Test("inspect --pages: one row per page with sizes and margins in inches, and the margin spread of full-body pages")
     func inspectPages() async throws {
         var pages = Self.book()

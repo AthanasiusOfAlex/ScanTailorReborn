@@ -43,6 +43,28 @@ struct ContentBoxAndMarginTests {
         #expect(!result.rejectedBoxes.isEmpty)
     }
 
+    @Test("Specks smaller than a glyph never stretch the content box, whether near the text or at the page edge")
+    func testSpecksDoNotSetTheContentBox() throws {
+        var bitmap = BinaryBitmap(width: 1200, height: 1800, initialBlack: false)
+        for lineY in stride(from: 280, through: 1456, by: 42) {
+            fillTextBlock(&bitmap, rect: Rect2I(x: 220, y: lineY, width: 760, height: 24))
+        }
+        let clean = try #require(ContentBoxDetector().detect(in: bitmap, dpi: 600).contentBox)
+
+        // Dust: a few pixels across, above the text (where a header would be), below it (a page number), and at the side.
+        for (x, y) in [(600, 190), (610, 1570), (1100, 700), (230, 1650), (900, 120)] {
+            fillSolidRect(&bitmap, rect: Rect2I(x: x, y: y, width: 6, height: 7))
+        }
+        let result = ContentBoxDetector().detect(in: bitmap, dpi: 600)
+        #expect(result.contentBox == clean)
+        #expect(result.rejectedBoxes.count >= 5)
+
+        // A real page number (several glyphs) in the same place is still rescued.
+        fillTextBlock(&bitmap, rect: Rect2I(x: 580, y: 1540, width: 40, height: 22))
+        let withFolio = try #require(ContentBoxDetector().detect(in: bitmap, dpi: 600).contentBox)
+        #expect(withFolio.maxY >= 1560)
+    }
+
     @Test("Split-edge exclusion zone masks residual spine crease prior to morphological closing on sliced sub-pages")
     func testSplitBoundaryNoiseExclusionZonePreventsCreaseBridging() throws {
         let width = 1200

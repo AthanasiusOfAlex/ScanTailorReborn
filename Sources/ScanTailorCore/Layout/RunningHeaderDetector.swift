@@ -518,6 +518,21 @@ public struct RunningHeaderDetector: Sendable {
                     center = cluster.center
                 }
             }
+            // Second chance for candidates just outside the cluster: a header whose folio digits are taller than its
+            // words (the height ratio is a little high), or one with extra space below it (the first body line is
+            // sunk: the offset is larger, the header itself unchanged).
+            var lenient: Set<Int> = []
+            if let center, !members.isEmpty {
+                for i in candidates where !members.contains(i) {
+                    guard let m = measures[i] else { continue }
+                    let ratioDistance = abs(m.ratio - center.ratio) / configuration.heightRatioTolerance
+                    let offsetDistance = abs(m.offset - center.offset) / configuration.offsetTolerancePitches
+                    let sunkBody = m.offset > center.offset && ratioDistance <= 1.0
+                    let tallFolio = offsetDistance <= 1.0 && ratioDistance <= 1.5
+                    if sunkBody || tallFolio { lenient.insert(i) }
+                }
+                members.formUnion(lenient)
+            }
             let support = textIndices.isEmpty ? 0 : Double(members.count) / Double(textIndices.count)
 
             let startFractions = textIndices.map { Double(profiles[$0].lines[0].bounds.minY) / Double(max(1, profiles[$0].pageSize.height)) }
@@ -555,7 +570,12 @@ public struct RunningHeaderDetector: Sendable {
                             abs(m.ratio - center.ratio) / configuration.heightRatioTolerance
                         )
                         let base = tooFewPages ? 0.45 : 0.6 + 0.4 * support
-                        confidence = base * (1.0 - 0.5 * min(1.0, distance))
+                        if lenient.contains(i) {
+                            flags.append("header:lenient")
+                            confidence = base * 0.7
+                        } else {
+                            confidence = base * (1.0 - 0.5 * min(1.0, distance))
+                        }
                     } else {
                         isHeader = false
                         if m.isCandidate && center != nil {

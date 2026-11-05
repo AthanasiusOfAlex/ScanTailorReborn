@@ -156,6 +156,7 @@ extension ScanTailorCLI {
         if !flagged.isEmpty {
             lines.append("Low-confidence pages: " + flagged.joined(separator: ", "))
         }
+        lines.append(formatReview(reviewFindings(manifest)))
         return lines.joined(separator: "\n")
     }
 }

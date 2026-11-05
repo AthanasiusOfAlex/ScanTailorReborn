@@ -46,6 +46,8 @@ struct RunningHeaderDetectionTests {
         var footerFolio = false
         var heading: (core: Int, offset: Int)? = nil
         var bodyLines = 24
+        /// Extra space between the header and the first body line (a sunk first paragraph).
+        var bodyGap = 0
     }
 
     /// Ink rectangles for one page. Returns the rects plus the expected anchors.
@@ -73,6 +75,7 @@ struct RunningHeaderDetectionTests {
         } else {
             bodyStart = headerBaseline + 20
         }
+        bodyStart += spec.bodyGap
         for i in 0..<spec.bodyLines {
             rects += lineRects(baseline: bodyStart + i * pitch, x0: 100, x1: 900, core: bodyCore)
         }
@@ -181,6 +184,22 @@ struct RunningHeaderDetectionTests {
         #expect(abs((recto.headerOffsetPitches ?? 0) - 2.5) < 0.1)
         #expect(abs((recto.bodyLinePitchPixels ?? 0) - Double(Self.pitch)) <= 1)
         #expect(recto.footerFolioCount == 1)
+    }
+
+    @Test("Book: a header whose first body line is sunk lower than usual is still a header (second chance)")
+    func sunkBodyHeaders() throws {
+        var specs = (0..<10).map { _ in PageSpec() }
+        for i in [2, 6] { specs[i].bodyGap = 2 * Self.pitch }   // two of five recto pages: body two pitches lower
+        let profiles = specs.indices.map { Self.profile(specs[$0], index: $0, side: Self.side($0)) }
+        let analysis = RunningHeaderDetector().analyzeBook(profiles)
+        for i in specs.indices {
+            let anchor = analysis.anchors[i]
+            #expect(anchor.kind == .runningHeader, "page \(i): \(anchor.flags)")
+            #expect(anchor.confidence >= 0.5, "page \(i): confidence \(anchor.confidence)")
+            #expect(anchor.flags.contains("header:lenient") == [2, 6].contains(i), "page \(i): \(anchor.flags)")
+        }
+        let recto = try #require(analysis.model.sides.first { $0.side == .recto })
+        #expect(recto.headerPageCount == 5)
     }
 
     @Test("Book: chapter openers are title-like, headerless pages anchor on the first body baseline, footer folios are not body")
