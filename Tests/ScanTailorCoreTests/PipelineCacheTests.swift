@@ -124,8 +124,8 @@ struct PipelineCacheTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let reference = try await Self.run(Self.pipeline())
-        #expect(reference.output.manifest.prunedPages.count == 1, "the blank fifth scan is pruned")
-        #expect(reference.output.manifest.pages.count == 7)
+        #expect(reference.output.manifest.prunedPages.isEmpty, "the blank fifth scan lies between pages: it keeps the book's order")
+        #expect(reference.output.manifest.pages.count == 8)
         #expect(reference.cache == nil)
 
         let cold = try await Self.run(Self.pipeline(jobs: 3, cache: dir))
@@ -137,8 +137,8 @@ struct PipelineCacheTests {
         Self.expectSame(reference, warm)
         #expect(warm.cache?.scansReused == 8)
         #expect(warm.cache?.scans == 8)
-        #expect(warm.cache?.ocrReused == 7)
-        #expect(warm.cache?.ocrPages == 7)
+        #expect(warm.cache?.ocrReused == 8)
+        #expect(warm.cache?.ocrPages == 8)
         #expect(warm.ocrCalls == 0, "no OCR at all: pruning checks are cached with the scan, page text by its pixels")
 
         let report = try #require(warm.output.manifest.run)

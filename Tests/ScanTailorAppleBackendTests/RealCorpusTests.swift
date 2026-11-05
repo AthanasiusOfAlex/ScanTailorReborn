@@ -33,7 +33,7 @@ struct RealCorpusTests {
     static let gury = Sample(name: "gury.1866", relativePath: "gury.1866/00-pdf-orig/gury.1866.pdf", pages: 300...307)
     static let vermeersch = Sample(name: "vermeersch.1934", relativePath: "vermeersch.1934/00-pdf-orig/vermeersch.1934.pdf", pages: 1...6)
     /// Spreads 57–59 are folios 110–115: curved headers, fore-edge page stacks, and noise beside the folios.
-    static let long = Sample(name: "long.2015 (folios 110-115)", relativePath: "long.2015/00-pdf-orig/orig.pdf", pages: 57...59)
+    static let long = Sample(name: "long.2015 (folios 110-115)", relativePath: "long.2015/00-pdf-orig/long.2015.pdf", pages: 57...59)
 
     /// Scans 2-8 around the landscape table on scan 5 (the fourth scan of the sample).
     static let sle = Sample(name: "SLE.2 (landscape table)", relativePath: "SLE.2/00-pdf-orig/SLE.2.pdf", pages: 2...8)

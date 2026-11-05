@@ -82,6 +82,8 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
     public var outlierGroups: [[Int]]
     /// Source page indices that were not split because they are landscape in a portrait book.
     public var splitVetoedSourcePages: [Int]
+    /// Source page indices split as spreads because the other scans of their size were, though their own gutter was too faint (7.1.1d).
+    public var splitByConsensusSourcePages: [Int]
     /// Output page indices drawn on their own canvas (Substep 6.2.2).
     public var isolatedCanvasPages: [Int]
     /// Entries of a manual `--outlier-pages` list (1-based) that name no page of the book.
@@ -101,6 +103,7 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
         outlierPages: [Int] = [],
         outlierGroups: [[Int]] = [],
         splitVetoedSourcePages: [Int] = [],
+        splitByConsensusSourcePages: [Int] = [],
         toleranceFraction: Double = 0.08,
         isolatedCanvasPages: [Int] = [],
         ignoredManualPages: [Int] = [],
@@ -118,6 +121,7 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
         self.outlierPages = outlierPages
         self.outlierGroups = outlierGroups
         self.splitVetoedSourcePages = splitVetoedSourcePages
+        self.splitByConsensusSourcePages = splitByConsensusSourcePages
         self.toleranceFraction = toleranceFraction
     }
 
@@ -132,6 +136,7 @@ public struct DimensionConsensusSummary: Sendable, Equatable, Codable {
         outlierPages = try c.decodeIfPresent([Int].self, forKey: .outlierPages) ?? []
         outlierGroups = try c.decodeIfPresent([[Int]].self, forKey: .outlierGroups) ?? []
         splitVetoedSourcePages = try c.decodeIfPresent([Int].self, forKey: .splitVetoedSourcePages) ?? []
+        splitByConsensusSourcePages = try c.decodeIfPresent([Int].self, forKey: .splitByConsensusSourcePages) ?? []
         toleranceFraction = try c.decodeIfPresent(Double.self, forKey: .toleranceFraction) ?? 0.08
         isolatedCanvasPages = try c.decodeIfPresent([Int].self, forKey: .isolatedCanvasPages) ?? []
         ignoredManualPages = try c.decodeIfPresent([Int].self, forKey: .ignoredManualPages) ?? []

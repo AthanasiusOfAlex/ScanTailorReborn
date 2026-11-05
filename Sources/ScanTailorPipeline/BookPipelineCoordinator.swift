@@ -214,17 +214,32 @@ public struct PrunedPageRecord: Sendable, Equatable, Codable {
     public var inkDensity: Double
     /// Human-readable explanation of why this slice was pruned.
     public var reason: String
+    /// Why, in a word: `leadingBlank`, `trailingBlank`, `coverSheet`, `cover` or `adjustment` (`nil` in older manifests).
+    public var kind: String?
 
     public init(
         sourcePageIndex: Int,
         splitSide: PageSide,
         inkDensity: Double,
-        reason: String
+        reason: String,
+        kind: String? = nil
     ) {
         self.sourcePageIndex = sourcePageIndex
         self.splitSide = splitSide
         self.inkDensity = inkDensity
         self.reason = reason
+        self.kind = kind
+    }
+
+    private enum CodingKeys: String, CodingKey { case sourcePageIndex, splitSide, inkDensity, reason, kind }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sourcePageIndex = try c.decode(Int.self, forKey: .sourcePageIndex)
+        splitSide = try c.decode(PageSide.self, forKey: .splitSide)
+        inkDensity = try c.decode(Double.self, forKey: .inkDensity)
+        reason = try c.decode(String.self, forKey: .reason)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
     }
 }
 
@@ -439,6 +454,8 @@ public struct BookPipelineCoordinator: Sendable {
         public var gutterTrimWidth: Int
         /// Whether to automatically detect and prune blank sub-page slices (default: `true`).
         public var autoPruneBlankPages: Bool
+        /// What to do with library cover sheets and printed covers at the ends of the book (default: ``CoverHandling/auto``).
+        public var coverHandling: CoverHandling
         /// Maximum foreground ink density threshold (fraction in `[0, 1]`) to qualify as a blank page candidate (default: `0.010`, i.e. 1.0%).
         public var blankPageInkDensityThreshold: Double
         /// Whether 3D cubic-sheet curvature dewarping is enabled (default: `true`).
@@ -522,6 +539,7 @@ public struct BookPipelineCoordinator: Sendable {
             splitMode: PageSplitMode = .automatic,
             gutterTrimWidth: Int = 24,
             autoPruneBlankPages: Bool = true,
+            coverHandling: CoverHandling = .auto,
             blankPageInkDensityThreshold: Double = 0.010,
             enableDewarp: Bool = true,
             minDewarpSagPixelsAt600DPI: Double = 12.0,
@@ -577,6 +595,7 @@ public struct BookPipelineCoordinator: Sendable {
             self.splitMode = splitMode
             self.gutterTrimWidth = max(0, gutterTrimWidth)
             self.autoPruneBlankPages = autoPruneBlankPages
+            self.coverHandling = coverHandling
             self.blankPageInkDensityThreshold = min(max(0.0001, blankPageInkDensityThreshold), 0.10)
             self.enableDewarp = enableDewarp
             self.minDewarpSagPixelsAt600DPI = max(1.0, minDewarpSagPixelsAt600DPI)
@@ -1415,6 +1434,70 @@ public struct BookPipelineCoordinator: Sendable {
             try await self.processScan(plannedJobs[i], source: source, context: context)
         }
 
+        // A title page beside a blank half has no gutter to find: when the book's other scans of that size were
+        // split, split this one too (Substep 7.1.1d). The scan keeps the split in any later re-run.
+        var consensusSplitSources: [Int] = []
+        if configuration.splitMode == .automatic {
+            consensusSplitSources = BookEnds.consensusSplitScans(
+                sizes: source.sizes,
+                sliceCounts: scanResults.map { $0.slices.count },
+                eligible: jobs.map { $0.splitMode == .automatic }
+            )
+            if !consensusSplitSources.isEmpty {
+                var splitJobs = consensusSplitSources.map { srcIdx -> ScanJob in
+                    var job = jobs[srcIdx]
+                    job.splitMode = .twoPageSpread
+                    jobs[srcIdx] = job
+                    return job
+                }
+                let redone = try await BoundedParallel.map(count: splitJobs.count, jobs: jobCount) { [splitJobs] (i: Int) async throws(PipelineError) -> ScanResult in
+                    try await self.processScan(splitJobs[i], source: source, context: context)
+                }
+                splitJobs.removeAll()
+                for (srcIdx, result) in zip(consensusSplitSources, redone) { scanResults[srcIdx] = result }
+            }
+        }
+
+        // Library cover sheets (read from the first two and the last scan) and printed covers.
+        var coverVerdicts: [Int: (verdict: BookEnds.Verdict, reason: String)] = [:]   // by scan index
+        if configuration.coverHandling != .keep {
+            var covers: [Int: (BookEnds.Verdict, String)] = [:]
+            if let ocrEngine {
+                let ocr = CachedOCR(engine: ocrEngine, cache: cache)
+                for srcIdx in BookEnds.coverSheetCandidates(scanCount: scanResults.count) {
+                    var text = ""
+                    for slice in scanResults[srcIdx].slices {
+                        let bitmap = configuration.processingDPI >= configuration.outputDPI * 2
+                            ? accelerator.downsampleBinaryTo300DPI(slice.cleaned)
+                            : slice.cleaned
+                        if let result = try? await ocr.recognize(bitmap, dpi: configuration.outputDPI, languages: configuration.ocrLanguages) {
+                            text += " " + result.observations.map(\.text).joined(separator: " ")
+                        }
+                    }
+                    if let repository = CoverSheetDetector.repository(in: text) {
+                        covers[srcIdx] = (.coverSheet, "Cover sheet added by \(repository)")
+                    }
+                }
+            }
+            if configuration.coverHandling == .strip {
+                for srcIdx in BookEnds.printedCoverScans(sizes: source.sizes, tolerance: configuration.dimensionConsensusConfiguration.toleranceFraction) where covers[srcIdx] == nil {
+                    covers[srcIdx] = (.cover, "Printed cover (odd-sized first or last scan)")
+                }
+            }
+            coverVerdicts = covers.mapValues { (verdict: $0.0, reason: $0.1) }
+        }
+        // Which slices leave the book: covers, and blanks before the first or after the last page with content.
+        var flatBlank: [Bool] = []
+        var flatCover: [BookEnds.Verdict?] = []
+        for (srcIdx, result) in scanResults.enumerated() {
+            for slice in result.slices {
+                flatBlank.append(configuration.autoPruneBlankPages && slice.isBlank == true)
+                flatCover.append(coverVerdicts[srcIdx]?.verdict)
+            }
+        }
+        let pruneVerdicts = BookEnds.verdicts(isBlank: flatBlank, isCover: flatCover)
+        var flatIndex = -1
+
         // Number the pages in order, applying drops, blank pruning and every page edit.
         var numbered: [NumberedPage] = []
         var prunedPages: [PrunedPageRecord] = []
@@ -1423,6 +1506,7 @@ public struct BookPipelineCoordinator: Sendable {
         for (srcIdx, result) in scanResults.enumerated() {
             if result.slices.count > 1 { splitScanNumbers.insert(scanNumbers[srcIdx]) }
             for (sliceIndex, slice) in result.slices.enumerated() {
+                flatIndex += 1
                 let outIdx = numbered.count
                 let manualOverride = resolver.override(
                     outputIndex: outIdx,
@@ -1436,7 +1520,8 @@ public struct BookPipelineCoordinator: Sendable {
                             sourcePageIndex: srcIdx,
                             splitSide: slice.side,
                             inkDensity: 0,
-                            reason: "Dropped by an adjustment (drop: true)"
+                            reason: "Dropped by an adjustment (drop: true)",
+                            kind: "adjustment"
                         )
                     )
                     continue
@@ -1464,14 +1549,22 @@ public struct BookPipelineCoordinator: Sendable {
                     correctedEdits[srcIdx, default: jobs[srcIdx].edits][slice.side] = finalEdits
                 }
 
-                // Blank sub-page pruning (pages with any edit are kept).
-                if configuration.autoPruneBlankPages && manualOverride == nil && slice.isBlank == true {
+                // Covers and blank pages at the ends of the book (pages with any edit are kept).
+                if manualOverride == nil, let verdict = pruneVerdicts[flatIndex] {
+                    let reason: String
+                    switch verdict {
+                    case .coverSheet, .cover:
+                        reason = coverVerdicts[srcIdx]?.reason ?? "Cover"
+                    case .leadingBlank, .trailingBlank:
+                        reason = "Blank \(verdict == .leadingBlank ? "leading" : "trailing") sub-page slice (ink density \(String(format: "%.4f", slice.inkDensity)) < \(String(format: "%.4f", configuration.blankPageInkDensityThreshold)), 0 OCR words)"
+                    }
                     prunedPages.append(
                         PrunedPageRecord(
                             sourcePageIndex: srcIdx,
                             splitSide: slice.side,
                             inkDensity: slice.inkDensity,
-                            reason: "Blank sub-page slice (ink density \(String(format: "%.4f", slice.inkDensity)) < \(String(format: "%.4f", configuration.blankPageInkDensityThreshold)), 0 OCR words)"
+                            reason: reason,
+                            kind: verdict.rawValue
                         )
                     )
                     continue
@@ -1682,6 +1775,7 @@ public struct BookPipelineCoordinator: Sendable {
         }
         var dimensionResult = classifier.classify(pages: dimensionInputs)
         dimensionResult.summary.splitVetoedSourcePages = splitVetoedSources.sorted()
+        dimensionResult.summary.splitByConsensusSourcePages = consensusSplitSources
         var outlierCanvasSizes: [Int: Size2I] = [:]
         for (input, record) in zip(dimensionInputs, dimensionResult.records) {
             if let size = record.proposedCanvasSize { outlierCanvasSizes[input.pageIndex] = size }

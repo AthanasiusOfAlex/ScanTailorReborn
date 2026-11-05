@@ -42,13 +42,19 @@ struct BenchmarkTests {
     // Vermeersch (7.1.1c): specks are ignored and recto headers recognized automatically. Scan 2 has halftone gutter
     // shadow fused into its text on both halves; no rule separates it safely, so those two boxes are set by hand
     // (rects from the diagnostic images: text extent in inches from the page's top-left corner). The title page
-    // (scan 1, blank left half) is a cover matter for 7.1.1d and is left out of `boxes-sane`.
+    // (scan 1, blank left half) is split like the rest of the book and its blank half dropped (7.1.1d); its box
+    // takes in the library stamp and the gutter shadow, so it is set by hand too.
     static let vermeersch = Book(
         name: "vermeersch.1934", relativePath: "vermeersch.1934/00-pdf-orig/vermeersch.1934.pdf",
-        knownFailing: ["boxes-sane": "manual boxes for s2L and s2R (adjustments file)"],
+        knownFailing: [
+            "boxes-sane": "manual boxes for s1R, s2L and s2R (adjustments file)",
+            "canvas-hugs-text": "follows from the same three oversized boxes",
+            "no-odd-pages": "s2R's oversized box makes it a dimensional outlier until its manual box is set"
+        ],
         adjustments: """
         { "version": 1,
           "pages": {
+            "s1R": { "contentBox": { "rect": ["0.32in", "1.30in", "3.91in", "7.62in"] }, "_why": "library stamp and gutter shadow beside the title page text" },
             "s2L": { "contentBox": { "rect": ["1.23in", "0.65in", "4.82in", "7.45in"] }, "_why": "halftone gutter shadow fused with the text at the right edge" },
             "s2R": { "contentBox": { "rect": ["0.27in", "1.08in", "3.88in", "7.53in"] }, "_why": "halftone shadow along the left edge and top-left" }
           } }
@@ -98,7 +104,7 @@ struct BenchmarkTests {
         }
         let start = ContinuousClock.now
         let output = try await BookPipelineCoordinator(configuration: configuration).processBook(
-            reader: reader, writer: writer, accelerator: MetalComputeAccelerator(), ocrEngine: nil
+            reader: reader, writer: writer, accelerator: MetalComputeAccelerator(), ocrEngine: AppleVisionOCREngine()
         )
         let c = (ContinuousClock.now - start).components
         return (output.manifest, Double(c.seconds) + Double(c.attoseconds) * 1e-18)
@@ -168,19 +174,23 @@ struct BenchmarkTests {
 
         // 7. No page's text block is far bigger than the book's typical one or touches the top of its scan: those are
         //    gutter shadow and scan-edge ink taken for text (the pages `inspect --pages` lists under "Pages to check").
-        //    The first output page, a title page beside a blank half, belongs to the cover rules (7.1.1d).
         let sized = m.pages.compactMap { p -> (PageProcessingRecord, Rect2I)? in p.layoutPlan.sourceContentBox.map { (p, $0) } }
         func medianOf(_ values: [Int]) -> Double { values.isEmpty ? 0 : Double(values.sorted()[values.count / 2]) }
         let typicalW = medianOf(body.compactMap { $0.layoutPlan.sourceContentBox?.width })
         let typicalH = medianOf(body.compactMap { $0.layoutPlan.sourceContentBox?.height })
         let oversized = sized.filter { page, box in
-            page.outputPageIndex > 0 && (Double(box.width) > 1.08 * typicalW || Double(box.height) > 1.08 * typicalH
+            (Double(box.width) > 1.08 * typicalW || Double(box.height) > 1.08 * typicalH
                 || Double(box.minY) / dpi < 0.05)
         }.map { "\($0.0.outputPageIndex + 1)" }
         checks.append(.init(id: "boxes-sane", passed: oversized.isEmpty,
             detail: oversized.isEmpty ? "no oversized boxes" : "oversized boxes on pages \(oversized.joined(separator: ", "))"))
 
-        // 8. Criterion 10: the warm edit loop is fast (under a fifth of the cold run, or under 5 s).
+        // 8. Criterion 2: no cover sheet or double-width title scan is left in the book as an odd-sized page.
+        let outliers = m.dimensionConsensus?.outlierPages ?? []
+        checks.append(.init(id: "no-odd-pages", passed: outliers.isEmpty,
+            detail: outliers.isEmpty ? "no dimensional outliers" : "outlier pages \(outliers.map { String($0 + 1) }.joined(separator: ", "))"))
+
+        // 9. Criterion 10: the warm edit loop is fast (under a fifth of the cold run, or under 5 s).
         checks.append(.init(id: "warm-run-fast", passed: warm < max(5, cold / 5), detail: "cold \(f(cold)) s, warm \(f(warm)) s"))
 
         return Scorecard(

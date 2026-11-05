@@ -81,6 +81,7 @@ public struct ScanTailorCLI {
         public var splitMode: PageSplitMode = .automatic
         public var gutterTrimWidth: Int = 24
         public var autoPruneBlankPages: Bool = true
+        public var coverHandling: CoverHandling = .auto
         public var margins: PublicationMargins = .publicationDefault
         public var pageSize: PhysicalSizeSpec? = nil
         public var contentBoxSize: PhysicalSizeSpec? = nil
@@ -163,6 +164,7 @@ public struct ScanTailorCLI {
         var splitMode: PageSplitMode = .automatic
         var gutterTrimWidth = 24
         var autoPruneBlankPages = true
+        var coverHandling: CoverHandling = .auto
         var margins: PublicationMargins = .publicationDefault
         var pageSize: PhysicalSizeSpec? = nil
         var contentBoxSize: PhysicalSizeSpec? = nil
@@ -433,6 +435,13 @@ public struct ScanTailorCLI {
             case "--no-auto-prune", "--no-blank-pruning":
                 autoPruneBlankPages = false
                 i += 1
+            case "--cover-handling":
+                guard i + 1 < args.count else { throw .missingValue(flag: arg) }
+                guard let mode = CoverHandling(rawValue: args[i + 1].lowercased()) else {
+                    throw .invalidOptionValue(flag: arg, value: args[i + 1])
+                }
+                coverHandling = mode
+                i += 2
             case "--no-ocr":
                 enableOCR = false
                 i += 1
@@ -480,6 +489,7 @@ public struct ScanTailorCLI {
         opts.splitMode = splitMode
         opts.gutterTrimWidth = gutterTrimWidth
         opts.autoPruneBlankPages = autoPruneBlankPages
+        opts.coverHandling = coverHandling
         opts.margins = margins
         opts.pageSize = pageSize
         opts.contentBoxSize = contentBoxSize
@@ -597,6 +607,7 @@ public struct ScanTailorCLI {
             splitMode: options.splitMode,
             gutterTrimWidth: options.gutterTrimWidth,
             autoPruneBlankPages: options.autoPruneBlankPages,
+            coverHandling: options.coverHandling,
             enableDewarp: options.enableDewarp,
             binarizerConfiguration: binConfig,
             harmonizerConfiguration: harmConfig,
@@ -987,6 +998,9 @@ public struct ScanTailorCLI {
                     text += " | ignored (not in book): " + consensus.ignoredManualPages.map(String.init).joined(separator: ",")
                 }
                 if consensus.ambiguous { text += " | ambiguous: sizes not trusted" }
+                if !consensus.splitByConsensusSourcePages.isEmpty {
+                    text += " | split like the rest of the book: scans " + consensus.splitByConsensusSourcePages.map { String($0 + 1) }.joined(separator: ",")
+                }
                 if !consensus.splitVetoedSourcePages.isEmpty {
                     text += " | not split: scans " + consensus.splitVetoedSourcePages.map { String($0 + 1) }.joined(separator: ",")
                 }
@@ -1028,7 +1042,7 @@ public struct ScanTailorCLI {
         }
         lines.append("Total Output Pages: \(manifest.pages.count) (from \(manifest.sourcePageSplits.count) source scan(s))")
         if !manifest.prunedPages.isEmpty {
-            lines.append("Pruned Blank Sub-Pages: \(manifest.prunedPages.count)")
+            lines.append("Pages left out: \(manifest.prunedPages.count)")
             for pruned in manifest.prunedPages {
                 lines.append("  - Source scan #\(manifest.sourceScanNumbers.indices.contains(pruned.sourcePageIndex) ? manifest.sourceScanNumbers[pruned.sourcePageIndex] : pruned.sourcePageIndex + 1) (\(pruned.splitSide.rawValue)): \(pruned.reason)")
             }
@@ -1120,7 +1134,9 @@ public struct ScanTailorCLI {
       --exclude-pages <list>       Comma-separated 1-based source scan indices to skip (e.g. 1,2,5)
       --first-page-side <side>     Initial logical book side: recto (default) or verso
       --binarize <method>          Adaptive thresholding: wolf (default) or sauvola
-      --no-auto-prune              Disable automatic pruning of blank sub-page slices
+      --no-auto-prune              Keep blank pages at the start and end too (blank pages between pages are always kept)
+      --cover-handling <mode>      auto (default): drop JSTOR/Project MUSE/Google Books/Internet Archive cover sheets;
+                                   strip: also drop an odd-sized printed cover; keep: drop none
       --no-dewarp                  Disable 3D cubic-sheet curvature dewarping
       --no-perspective             Disable document-quad detection and perspective rectification (alias --no-quad)
       --no-desk-mask               Disable residual desk/background masking before binarization

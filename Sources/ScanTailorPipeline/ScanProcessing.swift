@@ -38,7 +38,7 @@ struct ScanJob: Sendable {
     /// Stored geometry record, with any rectification or desk-mask edits merged in.
     let priorGeometry: SourcePageGeometryRecord?
     /// Split mode after the landscape veto and any `split` edit.
-    let splitMode: PageSplitMode
+    var splitMode: PageSplitMode
     /// An exact cut position from the adjustments file.
     let splitX: AdjustmentLength?
     /// The pixel-changing edits for each half the scan may produce.
