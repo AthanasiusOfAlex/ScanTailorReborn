@@ -9,12 +9,12 @@
 
 ## 1. Executive Summary
 
-**ScanTailorReborn** (`scantailor-cli`) is a high-performance, automated, pure **Swift 6** command-line book digitization pipeline designed to transform raw document scans and smartphone photographs into compact, publication-quality 300 DPI 1-bit monochrome PDFs (CCITT Group 4) with invisible searchable OCR text layers.
+**ScanTailorReborn** (`scantailor-reborn-cli`) is a high-performance, automated, pure **Swift 6** command-line book digitization pipeline designed to transform raw document scans and smartphone photographs into compact, publication-quality 300 DPI 1-bit monochrome PDFs (CCITT Group 4) with invisible searchable OCR text layers.
 
 ### The Agent-in-the-Loop Digitization Philosophy
 No purely deterministic image-processing CLI can anticipate every real-world edge case—such as camera perspective skew, uneven desk lighting, thumb holds, or irregular binding styles—without hundreds of fragile heuristics. **ScanTailorReborn is therefore architected as an Agentic Tool designed to be wielded directly from the command line by an AI assistant (Antigravity, Claude Code, Codex).**
 
-Rather than requiring programmatic Swift library bindings, the AI agent interacts with the pipeline just as an expert human operator would: invoking the `scantailor-cli` executable, setting fine-grained command-line options (`--margins`, `--gutter-trim-width`, `--ocr-languages`, `--page-size`), analyzing the machine-readable manifest and visual diagnostic overlays, and iteratively tuning parameters.
+Rather than requiring programmatic Swift library bindings, the AI agent interacts with the pipeline just as an expert human operator would: invoking the `scantailor-reborn-cli` executable, setting fine-grained command-line options (`--margins`, `--gutter-trim-width`, `--ocr-languages`, `--page-size`), analyzing the machine-readable manifest and visual diagnostic overlays, and iteratively tuning parameters.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
@@ -28,7 +28,7 @@ Rather than requiring programmatic Swift library bindings, the AI agent interact
 │                          parameters, queries the user when needed, and applies tweaks. │
 ├─────────────────────────────────────────────────────────────────────────────────────────┤
 │  Tier 3: CLI Tool        Performs heavy-lifting compute: 600 DPI Metal GPU shaders,    │
-│  (scantailor-cli)        cubic-sheet dewarp solvers, CCITT Group 4 compression, C-FFI   │
+│  (scantailor-reborn-cli)        cubic-sheet dewarp solvers, CCITT Group 4 compression, C-FFI   │
 │                          Tesseract/Vision OCR, and sub-second manifest-driven tweaks.  │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -105,7 +105,7 @@ This white paper establishes:
 
 ## 3. Deep-Dive Diagnostic Analysis of Camera Scans
 
-While `scantailor-cli` processed `simpson.1968.400-403.pdf` end-to-end, close inspection of the output and diagnostic overlays (`page-0001-diag.png` through `page-0004-diag.png`) revealed four critical algorithmic challenges unique to mobile camera captures:
+While `scantailor-reborn-cli` processed `simpson.1968.400-403.pdf` end-to-end, close inspection of the output and diagnostic overlays (`page-0001-diag.png` through `page-0004-diag.png`) revealed four critical algorithmic challenges unique to mobile camera captures:
 
 ```mermaid
 flowchart TD
@@ -236,10 +236,10 @@ graph TD
    - Handheld camera exposures taken at non-orthogonal angles must be homographically rectified (keystoning removed) to a flat rectangular plane prior to cylindrical spine dewarping.
 
 10. **Deterministic AI-Agent Intervention & Override Architecture**:
-    - An AI agent driving `scantailor-cli` must be able to inspect the machine-readable manifest (`--manifest book-manifest.json`), evaluate page-by-page diagnostic metrics, and issue surgical adjustments without re-running the entire book:
+    - An AI agent driving `scantailor-reborn-cli` must be able to inspect the machine-readable manifest (`--manifest book-manifest.json`), evaluate page-by-page diagnostic metrics, and issue surgical adjustments without re-running the entire book:
       ```bash
       # Agent applies precise per-page overrides from a modified manifest in < 2 seconds:
-      scantailor-cli process input.pdf -o output.pdf --apply-manifest modified-manifest.json
+      scantailor-reborn-cli process input.pdf -o output.pdf --apply-manifest modified-manifest.json
       ```
     - Overrides must support: `contentBox` nudge (in inches, mm, or px), `pageSize`, `skewDegrees`, `splitCenter`, `dewarpDisable`, and `tier` reassignment.
 
@@ -378,7 +378,7 @@ To advance **ScanTailorReborn** from its current v2.0 baseline to complete **v1.
 
 #### Step 7.2: Release Documentation & Changelog Finalization
 - **Substep 7.2.1: CLI Documentation & AI Agent Skill Reference**
-  - *Description*: Rewrite [README.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/README.md) to match `--help`, document the adjustments file and the iterate loop, and add the `scantailor-reborn` agent skill (in `.claude/skills/`, `.agents/skills/` and packaged as a Claude Code plugin; it checks that `scantailor-cli` is installed).
+  - *Description*: Rewrite [README.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/README.md) to match `--help`, document the adjustments file and the iterate loop, and add the `scantailor-reborn` agent skill (in `.claude/skills/`, `.agents/skills/` and packaged as a Claude Code plugin; it checks that `scantailor-reborn-cli` is installed).
   - *Proposed Model*: **Sonnet**
   - *Effort Level*: **Medium**
 - **Substep 7.2.2: Executable Rename, Version Tagging & CHANGELOG.md Finalization**

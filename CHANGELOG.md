@@ -1,6 +1,6 @@
 # ScanTailorReborn: Changelog & Architectural Evolution
 
-This document traces the complete development history of **ScanTailorReborn**, detailing where the project started, the real-world empirical benchmarks that identified core deficiencies, and the systematic algorithmic enhancements executed across Phases 1, 2, and 3.
+This document traces the complete development history of **ScanTailorReborn**, detailing where the project started, the real-world empirical benchmarks that identified core deficiencies, and the systematic algorithmic enhancements executed across Phases 1 through 7 (Phases 4–7 are recorded in section 6).
 
 ---
 
@@ -186,3 +186,32 @@ To eliminate these deficiencies, a 3-phase architectural overhaul was planned, e
 | `--ocr-engine` | `<engine>` | OCR engine selection: `apple` (default on macOS), `tesseract`, or `dual`. |
 | `--ocr-languages` | `<langs>` | Language codes, e.g. `"grc+lat"`, `"en-US"`, `"frk"` (aliases: `--languages`, `--ocr-lang`). |
 | `--tessdata-dir` | `<path>` | Custom directory containing Tesseract `.traineddata` models. |
+
+---
+
+## 6. Phases 4–7: Camera Photos, Layout Control and Release (v1.0.0)
+
+Phases 4–7 took the pipeline from flatbed scans to smartphone photographs of books, then made the layout rules explicit, inspectable and correctable. The rules are in [README.md](README.md#layout-rules).
+
+**Phase 4: dimensions and illumination**
+- Physical-scale analysis: font-size and DPI telemetry, `--input-dpi`, `--content-box-size`, `--page-size` presets.
+- Dual-pass illumination flattening before binarization.
+
+**Phase 5: camera captures**
+- Document-quadrangle detection, then perspective rectification and sheet cropping (`--no-perspective`).
+- Desk-surface masking before binarization (`--no-desk-mask`).
+- Macro-cluster border cleaning fallback for pages with marginal geometry (`--no-border-fallback`).
+
+**Phase 6: harmonized layout**
+- Running-header detection and a vertical registration anchor (`--vertical-anchor`, `--no-running-headers`).
+- Consensus dimension clustering; covers, plates and foldouts of another size stay out of the book canvas (`--dimension-consensus`).
+- Manual outlier list with isolated outlier canvases (`--outlier-pages`, `--outlier-canvas`, `--outlier-tolerance`).
+- Adjustments file (`--apply-manifest`), layout-only runs (`--stop-after layout`), the `inspect` command, and cached, parallel re-runs (`--cache-dir`, `--no-cache`, `--timings`).
+
+**Phase 7: publication layout and release**
+- Publication layout: the canvas is the largest clean text block plus 1/4 in top and bottom and 1/2 in left and right; pages are centered; header pages hang from the top; headerless openings that run to the foot sit on the bottom; floating pages keep their offset; the frame ignores boxes swollen by gutter or edge noise.
+- Camera-photo gutter handling, strict margins, and scaling of camera pages to the book's text block.
+- Speck guard, lenient headers and a "pages to check" list.
+- Cover handling (`--cover-handling`), end-only blank pruning, consensus split, kept blank pages laid out blank, page-edge stacks and content-overflow re-judging.
+- README rewritten against `--help`; the `scantailor-reborn` agent skill and Claude Code plugin.
+- **Executable renamed** from `scantailor-cli` to `scantailor-reborn-cli`, to avoid a clash with the original Scan Tailor.

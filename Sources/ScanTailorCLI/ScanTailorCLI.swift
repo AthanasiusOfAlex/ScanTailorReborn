@@ -780,7 +780,7 @@ public struct ScanTailorCLI {
 
         let flaggedPages = result.manifest.pages.filter(\.flaggedLowConfidence)
         if options.stopAfter != nil {
-            print("Stopped after the layout: \(result.manifest.pages.count) page(s) planned; no PDF was written. Inspect with: scantailor-cli inspect <manifest.json> --pages")
+            print("Stopped after the layout: \(result.manifest.pages.count) page(s) planned; no PDF was written. Inspect with: scantailor-reborn-cli inspect <manifest.json> --pages")
             if !flaggedPages.isEmpty {
                 let indices = flaggedPages.map { String($0.outputPageIndex + 1) }.joined(separator: ", ")
                 print("WARNING: \(flaggedPages.count) page(s) had confidence below threshold: [\(indices)]")
@@ -800,7 +800,7 @@ public struct ScanTailorCLI {
     private static func printReviewSummary(_ manifest: BookProcessingManifest) {
         let pages = reviewFindings(manifest).map { String($0.page) }
         guard !pages.isEmpty else { return }
-        print("Pages to check (\(pages.count)): [\(pages.joined(separator: ", "))]. Reasons and adjustments-file entries: scantailor-cli inspect <manifest.json> --pages")
+        print("Pages to check (\(pages.count)): [\(pages.joined(separator: ", "))]. Reasons and adjustments-file entries: scantailor-reborn-cli inspect <manifest.json> --pages")
     }
 
     public static func executeInspect(_ args: [String]) throws {
@@ -1108,8 +1108,8 @@ public struct ScanTailorCLI {
 
     public static let usageText = """
     USAGE:
-      scantailor-cli process <input.pdf> -o <output.pdf> [options]
-      scantailor-cli inspect <manifest.json> [--pages] [--json]
+      scantailor-reborn-cli process <input.pdf> -o <output.pdf> [options]
+      scantailor-reborn-cli inspect <manifest.json> [--pages] [--json]
 
     PROCESS OPTIONS:
       -o, --output <path>          Output PDF path (300 DPI, 1-bit, searchable) (required unless --stop-after)
@@ -1166,8 +1166,8 @@ public struct ScanTailorCLI {
       --timings                    Print elapsed time per pass and work time per stage
 
     ITERATING (agent or human):
-      1. scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/     (fast: no PDF, no OCR)
-      2. scantailor-cli inspect d/book-layout-manifest.json --pages                   (sizes and margins per page)
+      1. scantailor-reborn-cli process book.pdf --stop-after layout --diagnostics-dir d/     (fast: no PDF, no OCR)
+      2. scantailor-reborn-cli inspect d/book-layout-manifest.json --pages                   (sizes and margins per page)
          and look at d/layout-sheet-01.png ...                                        (red: canonical frame,
                                                                                        green: text block, orange: outlier)
       3. Write adjustments.json, then repeat step 1 with --apply-manifest adjustments.json

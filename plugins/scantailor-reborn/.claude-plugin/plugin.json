@@ -1,7 +1,7 @@
 {
   "name": "scantailor-reborn",
   "version": "1.0.0",
-  "description": "Drive scantailor-cli (ScanTailorReborn) to clean, lay out and OCR scanned books, and fix bad pages with an adjustments file. Requires the scantailor-cli tool to be installed.",
+  "description": "Drive scantailor-reborn-cli (ScanTailorReborn) to clean, lay out and OCR scanned books, and fix bad pages with an adjustments file. Requires the scantailor-reborn-cli tool to be installed.",
   "author": { "name": "AthanasiusOfAlex" },
   "homepage": "https://github.com/AthanasiusOfAlex/ScanTailorReborn",
   "keywords": ["scan", "pdf", "ocr", "book", "layout"]

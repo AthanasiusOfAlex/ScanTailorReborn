@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "scantailor-reborn",
-      "description": "Agent skill for scantailor-cli: plan, inspect and correct book-scan layout, then render a clean searchable PDF. Requires scantailor-cli (brew tap AthanasiusOfAlex/scantailor-reborn).",
+      "description": "Agent skill for scantailor-reborn-cli: plan, inspect and correct book-scan layout, then render a clean searchable PDF. Requires scantailor-reborn-cli (brew tap AthanasiusOfAlex/scantailor-reborn).",
       "source": "./plugins/scantailor-reborn",
       "category": "productivity"
     }

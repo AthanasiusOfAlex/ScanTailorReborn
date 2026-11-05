@@ -34,7 +34,7 @@ let package = Package(
             targets: ["ScanTailorPipeline"]
         ),
         .executable(
-            name: "scantailor-cli",
+            name: "scantailor-reborn-cli",
             targets: ["ScanTailorCLI"]
         ),
     ],

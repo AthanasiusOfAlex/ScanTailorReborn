@@ -1,24 +1,24 @@
 ---
 name: scantailor-reborn
-description: Turn scanned or photographed books (PDF) into clean, uniform, searchable black-and-white PDFs with the scantailor-cli tool, and fix pages that automatic layout gets wrong through an adjustments file. Use when the user wants to clean up, deskew, split, re-margin, resize or OCR a scanned book or article PDF, or wants to inspect or correct the layout of such a run.
+description: Turn scanned or photographed books (PDF) into clean, uniform, searchable black-and-white PDFs with the scantailor-reborn-cli tool, and fix pages that automatic layout gets wrong through an adjustments file. Use when the user wants to clean up, deskew, split, re-margin, resize or OCR a scanned book or article PDF, or wants to inspect or correct the layout of such a run.
 ---
 
-# ScanTailorReborn (`scantailor-cli`)
+# ScanTailorReborn (`scantailor-reborn-cli`)
 
 Turns a raw book scan PDF into a 300 DPI, 1-bit, searchable PDF with uniform pages. You drive it as a loop: plan cheaply, look, correct only what is wrong, then render once.
 
 ## 0. Check the tool first
 
-Run `command -v scantailor-cli`. If it prints nothing, **stop** and tell the user it is not installed. Do not guess at other tools. Offer:
+Run `command -v scantailor-reborn-cli`. If it prints nothing, **stop** and tell the user it is not installed. Do not guess at other tools. Offer:
 
 ```
 brew tap AthanasiusOfAlex/scantailor-reborn && brew install scantailor-reborn
 ```
 
 or, from source (macOS 14+, Swift 6, `brew install tesseract`):
-`git clone https://github.com/AthanasiusOfAlex/ScanTailorReborn.git && cd ScanTailorReborn && swift build -c release`, then put `.build/release/scantailor-cli` on the `PATH`.
+`git clone https://github.com/AthanasiusOfAlex/ScanTailorReborn.git && cd ScanTailorReborn && swift build -c release`, then put `.build/release/scantailor-reborn-cli` on the `PATH`.
 
-`scantailor-cli --help` is the authoritative option list; trust it over this file if they differ.
+`scantailor-reborn-cli --help` is the authoritative option list; trust it over this file if they differ.
 
 ## 1. Ask what you cannot see
 
@@ -31,8 +31,8 @@ Before the first run, find out (ask only what is not already clear):
 ## 2. Plan the layout only (fast: no PDF, no OCR)
 
 ```
-scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/ [options]
-scantailor-cli inspect d/book-layout-manifest.json --pages
+scantailor-reborn-cli process book.pdf --stop-after layout --diagnostics-dir d/ [options]
+scantailor-reborn-cli inspect d/book-layout-manifest.json --pages
 ```
 
 The manifest is named `<input-stem>-layout-manifest.json`. `inspect --pages` prints one line per output page (scan, side, tier, page size, text size, margins, skew, confidence, notes). `inspect --json` is the same data for programs. Contact sheets are `d/layout-sheet-NN.png` (red: canonical frame, green: text block, orange: outlier); `d/page-NNNN-diag.png` overlays exist for low-confidence pages. Look at the images, not only the numbers.
@@ -76,7 +76,7 @@ Manual entries always beat automatic detection. An exact `--outlier-pages` list 
 When the layout looks right, run without `--stop-after`:
 
 ```
-scantailor-cli process book.pdf -o book-clean.pdf --apply-manifest adjustments.json [options]
+scantailor-reborn-cli process book.pdf -o book-clean.pdf --apply-manifest adjustments.json [options]
 ```
 
 OCR for unchanged pages is reused. Add `--timings` to see where time goes; `-j N` sets parallelism (default 4; memory grows with it). `--no-cache` ignores the cache; `--cache-dir` moves it.

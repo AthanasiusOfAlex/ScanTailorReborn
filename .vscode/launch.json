@@ -5,20 +5,20 @@
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:ScanTailorReborn}",
-            "name": "Debug scantailor-cli",
-            "target": "scantailor-cli",
+            "name": "Debug scantailor-reborn-cli",
+            "target": "scantailor-reborn-cli",
             "configuration": "debug",
-            "preLaunchTask": "swift: Build Debug scantailor-cli"
+            "preLaunchTask": "swift: Build Debug scantailor-reborn-cli"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:ScanTailorReborn}",
-            "name": "Release scantailor-cli",
-            "target": "scantailor-cli",
+            "name": "Release scantailor-reborn-cli",
+            "target": "scantailor-reborn-cli",
             "configuration": "release",
-            "preLaunchTask": "swift: Build Release scantailor-cli"
+            "preLaunchTask": "swift: Build Release scantailor-reborn-cli"
         }
     ]
 }

@@ -40,7 +40,7 @@ All test suites under [`Tests/`](../Tests) synthesize their own PDFs and bitmaps
   ```bash
   scripts/test.sh corpus RealCorpusTests
   ```
-  Real scans are in `<book>/00-pdf-orig/` (occasionally `00-jpeg-orig`). `scantailor-cli process … --diagnostics-dir <dir>` writes `<stem>-lines.json` there (every page's detected text lines, anchor and registration) for debugging detector misses.
+  Real scans are in `<book>/00-pdf-orig/` (occasionally `00-jpeg-orig`). `scantailor-reborn-cli process … --diagnostics-dir <dir>` writes `<stem>-lines.json` there (every page's detected text lines, anchor and registration) for debugging detector misses.
 
 ---
 
@@ -55,7 +55,7 @@ Every target compiles with `.swiftLanguageMode(.v6)` and `.enableUpcomingFeature
 | [`ScanTailorCore`](../Sources/ScanTailorCore) | Portable vision & layout algorithms: `FontScaleAnalyzer`, `PhysicalSizeSpec`, `DocumentQuadDetector`, `PerspectiveRectifier`, `PaperRegionMasker`, `PageSplitEstimator`, `SkewEstimator`, `ContentBoxDetector`, `CylindricalDewarpSolver` + `TextLineTracer`, `AdaptiveBinarizer` (Sauvola/Wolf/Otsu), `BackgroundNormalizer`, `BorderAndSpeckleCleaner` (+ macro-cluster border fallback), `RunningHeaderDetector` (running headers, folios, top anchors), `MarginHarmonizer` (3-tier placement), `PublicationMargins`, binary morphology, seed-fill, and connected components. |
 | [`ScanTailorPipeline`](../Sources/ScanTailorPipeline) | 3-pass [`BookPipelineCoordinator`](../Sources/ScanTailorPipeline/BookPipelineCoordinator.swift) (pre-raster font-scale calibration; Pass 1: perspective rectification + 600 DPI per-page analysis; Pass 2: book-wide statistical harmonization & IQR outlier filtering; Pass 3: 600 -> 300 DPI render, OCR, post-calibration typography telemetry, & PDF assembly), `BookProcessingManifest` (incl. per-source-page `SourcePageGeometryRecord`s), and polyglot [`DualOCREngine`](../Sources/ScanTailorPipeline/OCR/DualOCREngine.swift). |
 | [`ScanTailorAppleBackend`](../Sources/ScanTailorAppleBackend) / [`ScanTailorPortableBackend`](../Sources/ScanTailorPortableBackend) / [`ScanTailorTesseractBackend`](../Sources/ScanTailorTesseractBackend) | `MetalComputeAccelerator` (MPS/Metal + vImage), `ApplePDFSourceReader`, `AppleVisionOCREngine`, `ApplePDFDocumentWriter` (1-bit CCITT Group 4 + invisible text layer), `DiagnosticOverlayRenderer`, pure-Swift SIMD `PortableComputeAccelerator`, and `TesseractOCREngine` (`CTesseract` + Leptonica C API). |
-| [`ScanTailorCLI`](../Sources/ScanTailorCLI) | `scantailor-cli` (`process`, `inspect`), JSON manifest persistence/overrides, typography & scale telemetry reporting, and low-confidence diagnostic overlay generation. |
+| [`ScanTailorCLI`](../Sources/ScanTailorCLI) | `scantailor-reborn-cli` (`process`, `inspect`), JSON manifest persistence/overrides, typography & scale telemetry reporting, and low-confidence diagnostic overlay generation. |
 
 ### 2.2 Completed Phases & Roadmap to `v1.0.0`
 - **Completed**: Initial 8-milestone core pipeline + v2.0 upgrades (see [`CHANGELOG.md`](../CHANGELOG.md)), empirical smartphone camera evaluation, 10 **v1.0 Release Criteria**, Agent-in-the-Loop CLI architecture, and the 4-Phase / 19-Substep execution plan in [`docs/WHITE_PAPER.md`](WHITE_PAPER.md) (lines 250–417):
@@ -285,21 +285,21 @@ Goal: an agent iterating with `--apply-manifest` / `--stop-after layout` should 
 
 ### 3.16 Recently Completed: Substep 7.2.1 (CLI Documentation and Agent Skill)
 1. **README** ([README.md](../README.md)) rewritten from `usageText`: every flag in `--help` is documented (checked by a script that greps each `--flag`), plus `inspect --pages/--json`, the layout rules, the iterate loop and the adjustments file. The loop was run on Flannery 1993 pp. 1–8 (`--stop-after layout`, then with `--apply-manifest`); output names are `<stem>-layout-manifest.json`, `layout-sheet-NN.png`, `page-NNNN-diag.png`. The `-o` help line no longer says "300 DPI 1-bit" in a misleading position.
-2. **Skill** `scantailor-reborn`: canonical copy in [plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md](../plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md); mirrored into `.claude/skills/` and `.agents/skills/` by [scripts/sync-skill.sh](../scripts/sync-skill.sh) (run it after editing the canonical copy). It starts by checking `command -v scantailor-cli` and, if missing, stops and gives the install commands.
+2. **Skill** `scantailor-reborn`: canonical copy in [plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md](../plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md); mirrored into `.claude/skills/` and `.agents/skills/` by [scripts/sync-skill.sh](../scripts/sync-skill.sh) (run it after editing the canonical copy). It starts by checking `command -v scantailor-reborn-cli` and, if missing, stops and gives the install commands.
 3. **Plugin**: [.claude-plugin/marketplace.json](../.claude-plugin/marketplace.json) plus [plugins/scantailor-reborn/.claude-plugin/plugin.json](../plugins/scantailor-reborn/.claude-plugin/plugin.json). Install: `/plugin marketplace add AthanasiusOfAlex/ScanTailorReborn`, then `/plugin install scantailor-reborn@scantailor-reborn`. Plugins cannot declare a required program, hence the check in the skill. Not yet tried against a published remote.
 4. **White paper**: criteria 2, 3 and 5 reworded to the implemented rules (inner/outer margins widen the canvas but pages are centered, not mirrored); Substep 7.2.3 (Homebrew tap) added; models updated.
-5. **Open point**: the original Scan Tailor also ships a `scantailor-cli`, so the binary name can clash. The tap and formula are named `scantailor-reborn`; renaming the executable is undecided.
+5. **Executable rename**: done in 7.2.2: the executable is now `scantailor-reborn-cli` (the original Scan Tailor ships `scantailor-cli`).
 
 ---
 
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 7, Substep 7.2.2**, copy and provide the following prompt:
+Substep 7.2.2 is done except for the tag (executable renamed to `scantailor-reborn-cli`, CHANGELOG §6 written, fast tests pass). To continue, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 7.2.2 — Version Tagging & CHANGELOG.md Finalization.
+We are resuming ScanTailorReborn after Substep 7.2.2's CHANGELOG and rename.
 
-1. Review `docs/HANDOFF.md` (§3 and the commit history from Phase 4 on) and `docs/WHITE_PAPER.md` Phase 7.
-2. Goal: finalize `CHANGELOG.md` for Phases 4–7 (accurate, grouped by phase), then tag `v1.0.0`. Propose the outline first and pause for approval; commit and push only when asked, and ask before pushing the tag.
-3. Then 7.2.3 (Homebrew tap) needs the pushed tag.
+1. Review `docs/HANDOFF.md` and `docs/WHITE_PAPER.md` Phase 7.
+2. If the rename/CHANGELOG commit is pushed, ask before creating and pushing the `v1.0.0` tag.
+3. Then 7.2.3 (Homebrew tap) needs the pushed tag. The executable is `scantailor-reborn-cli`.
 ```

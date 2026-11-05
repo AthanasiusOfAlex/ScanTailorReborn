@@ -2,7 +2,7 @@
 
 **ScanTailorReborn** is a command-line tool, written in pure **Swift 6** for macOS, that turns raw book scans and smartphone photos into clean, compact, searchable black-and-white PDFs with uniform page layout.
 
-It is an independent project inspired by Scan Tailor, not a fork of it. Its executable is called `scantailor-cli`.
+It is an independent project inspired by Scan Tailor, not a fork of it. Its executable is called `scantailor-reborn-cli`.
 
 ---
 
@@ -38,7 +38,7 @@ brew install scantailor-reborn
 git clone https://github.com/AthanasiusOfAlex/ScanTailorReborn.git
 cd ScanTailorReborn
 swift build -c release
-cp .build/release/scantailor-cli /usr/local/bin/    # optional
+cp .build/release/scantailor-reborn-cli /usr/local/bin/    # optional
 ```
 
 ### Tests
@@ -53,7 +53,7 @@ swift test                # everything
 ## Quick start
 
 ```bash
-scantailor-cli process book.pdf -o book-clean.pdf
+scantailor-reborn-cli process book.pdf -o book-clean.pdf
 ```
 
 With no options this splits spreads, cleans, lays out, runs Apple Vision OCR and writes a 300 DPI 1-bit PDF. A cache in `~/Library/Caches/ScanTailorReborn` makes repeat runs fast.
@@ -61,7 +61,7 @@ With no options this splits spreads, cleans, lays out, runs Apple Vision OCR and
 Scholarly book with Greek and Latin:
 
 ```bash
-scantailor-cli process book.pdf -o book-clean.pdf --ocr-languages "grc+lat+eng"
+scantailor-reborn-cli process book.pdf -o book-clean.pdf --ocr-languages "grc+lat+eng"
 ```
 
 (Naming a classical language picks `--ocr-engine dual` automatically.)
@@ -71,14 +71,14 @@ scantailor-cli process book.pdf -o book-clean.pdf --ocr-languages "grc+lat+eng"
 ## Commands
 
 ```
-scantailor-cli process <input.pdf> -o <output.pdf> [options]
-scantailor-cli inspect <manifest.json> [--pages] [--json]
-scantailor-cli --help
+scantailor-reborn-cli process <input.pdf> -o <output.pdf> [options]
+scantailor-reborn-cli inspect <manifest.json> [--pages] [--json]
+scantailor-reborn-cli --help
 ```
 
 ### `process`
 
-`scantailor-cli --help` prints the authoritative list. All options:
+`scantailor-reborn-cli --help` prints the authoritative list. All options:
 
 **Output and reports**
 
@@ -158,9 +158,9 @@ scantailor-cli --help
 Prints a summary of a saved manifest.
 
 ```bash
-scantailor-cli inspect d/book-layout-manifest.json            # summary
-scantailor-cli inspect d/book-layout-manifest.json --pages    # one line per page: size, margins, tier, flags
-scantailor-cli inspect d/book-layout-manifest.json --json     # machine-readable
+scantailor-reborn-cli inspect d/book-layout-manifest.json            # summary
+scantailor-reborn-cli inspect d/book-layout-manifest.json --pages    # one line per page: size, margins, tier, flags
+scantailor-reborn-cli inspect d/book-layout-manifest.json --json     # machine-readable
 ```
 
 ---
@@ -186,19 +186,19 @@ The pipeline is designed for a loop in which a person or an agent looks at cheap
 
 ```bash
 # 1. Plan the layout only. No PDF, no OCR; fast.
-scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/
+scantailor-reborn-cli process book.pdf --stop-after layout --diagnostics-dir d/
 
 # 2. Review it.
-scantailor-cli inspect d/book-layout-manifest.json --pages
+scantailor-reborn-cli inspect d/book-layout-manifest.json --pages
 #    and open d/layout-sheet-01.png, ...
 #    (red: canonical frame, green: text block, orange: outlier)
 
 # 3. Write adjustments.json for the pages that need it, then repeat step 1
 #    with --apply-manifest adjustments.json (repeats are fast: unchanged scans come from the cache).
-scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/ --apply-manifest adjustments.json
+scantailor-reborn-cli process book.pdf --stop-after layout --diagnostics-dir d/ --apply-manifest adjustments.json
 
 # 4. Satisfied? Write the PDF (OCR is reused for unchanged pages).
-scantailor-cli process book.pdf -o book-clean.pdf --apply-manifest adjustments.json
+scantailor-reborn-cli process book.pdf -o book-clean.pdf --apply-manifest adjustments.json
 ```
 
 Pages with low confidence also get PNG overlays in the diagnostics folder: green is the main text box, blue retained headers and side clusters, red rejected noise, magenta traced text lines.
@@ -235,31 +235,31 @@ Strict JSON. Keys starting with `_` and the key `note` are ignored, so you can a
 Cover and page selection:
 
 ```bash
-scantailor-cli process article.pdf -o clean.pdf --exclude-pages 1 --page-range 2-16
+scantailor-reborn-cli process article.pdf -o clean.pdf --exclude-pages 1 --page-range 2-16
 ```
 
 Flatbed scans, no dewarping or perspective correction:
 
 ```bash
-scantailor-cli process flatbed.pdf -o clean.pdf --no-dewarp --no-perspective
+scantailor-reborn-cli process flatbed.pdf -o clean.pdf --no-dewarp --no-perspective
 ```
 
 Fraktur with a deep binding crease:
 
 ```bash
-scantailor-cli process goethe.pdf -o clean.pdf --ocr-languages "deu_frak+deu" --gutter-trim-width 32
+scantailor-reborn-cli process goethe.pdf -o clean.pdf --ocr-languages "deu_frak+deu" --gutter-trim-width 32
 ```
 
 Fixed output size and wider margins:
 
 ```bash
-scantailor-cli process raw.pdf -o print.pdf --page-size 6x9in --margins "top=0.3in,bottom=0.3in,left=0.6in,right=0.6in"
+scantailor-reborn-cli process raw.pdf -o print.pdf --page-size 6x9in --margins "top=0.3in,bottom=0.3in,left=0.6in,right=0.6in"
 ```
 
 Smartphone photos wrapped in a PDF at 72 DPI, with a known source resolution:
 
 ```bash
-scantailor-cli process photos.pdf -o clean.pdf --input-dpi 300
+scantailor-reborn-cli process photos.pdf -o clean.pdf --input-dpi 300
 ```
 
 ---
@@ -273,7 +273,7 @@ The repository includes an agent skill that teaches an agent to drive the loop a
 /plugin install scantailor-reborn@scantailor-reborn
 ```
 
-The skill needs `scantailor-cli` on your `PATH` and says how to install it if it is missing.
+The skill needs `scantailor-reborn-cli` on your `PATH` and says how to install it if it is missing.
 
 ---
 
@@ -288,7 +288,7 @@ Sources/
 ├── ScanTailorAppleBackend/     # Metal, Apple Vision OCR, PDFKit/CoreGraphics I/O
 ├── ScanTailorTesseractBackend/ # Tesseract C-FFI wrapper
 ├── ScanTailorPipeline/         # Pass coordinator, dual OCR engine, manifest
-└── ScanTailorCLI/              # The scantailor-cli executable
+└── ScanTailorCLI/              # The scantailor-reborn-cli executable
 ```
 
 ---
