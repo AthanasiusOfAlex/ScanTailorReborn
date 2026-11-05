@@ -1,323 +1,304 @@
 # ScanTailorReborn
 
-**ScanTailorReborn** is a modern, high-performance command-line tool written in pure **Swift 6** designed to transform raw scans and smartphone photos of books into ultra-crisp, compact, archivable black-and-white PDFs.
+**ScanTailorReborn** is a command-line tool, written in pure **Swift 6** for macOS, that turns raw book scans and smartphone photos into clean, compact, searchable black-and-white PDFs with uniform page layout.
 
-It incorporates the principles of Scan Tailor with modern algorithmic enhancements: 600 DPI internal binarization, 3D cylindrical sheet dewarping for curved book spines, multi-scale deskew, dual-mode gutter detection and spine crease excision, split-boundary noise exclusion, illumination normalization, book-wide publication margin harmonization, Metal GPU compute acceleration, and a multi-engine invisible searchable text layer combining Apple Vision and Tesseract OCR (with polytonic Ancient Greek, Latin, and Fraktur support).
-
----
-
-## Features
-
-- **600 DPI Processing & 300 DPI 1-Bit CCITT Output**: Processes scans at full 600 DPI resolution for precise edge retention, producing compact 300 DPI 1-bit monochrome PDFs compressed using CCITT Group 4 fax encoding.
-- **Multi-Scale Deskew**: Automatically estimates and corrects skew angles to within ±0.05° using projection profile variance analysis and coarse-to-fine search, with calibrated confidence metrics.
-- **Intelligent Page Splitting & Dual-Mode Gutter Detection**: Automatically detects gutter shadows, spine creases, and dual-page book spreads. Dynamically switches between White Valley and Dark Crease modes based on vertical ink continuity ($\ge 75\%$) to bisect dark spine seams accurately.
-- **Central Gutter Strip Trimming**: Configurable gutter trimming (`--gutter-trim-width`) physically excises dark crease shadow bands during page slicing, preventing crease ink from entering downstream stages.
-- **Split-Boundary Noise Exclusion**: Directional pre-closing edge masking in content box detection prevents residual binding shadow or crease fragments from bridging into text blocks.
-- **Blank Sub-Page Auto-Pruning & Outlier Rejection**: Discards blank sub-page slices (e.g. single-page title scans on flatbeds) and applies interquartile range (IQR) outlier rejection to protect canonical page dimensions.
-- **3D Cylindrical Dewarping**: Traces text baselines across curved book gutters, fits 3D cubic sheet curvature models, and unrolls distorted page geometry to restore straight lines with flat-page auto-bypass.
-- **Adaptive Binarization**: Advanced adaptive thresholding algorithms (Wolf-Jolion and Sauvola) combined with background illumination normalization to remove paper bleed-through, stains, shadows, and yellowing.
-- **Publication Margin Harmonization**: Enforces uniform canonical page dimensions across the entire book with configurable publication margins (`--margins`), page ranges (`--page-range`), page exclusion (`--exclude-pages`), and initial logical side (`--first-page-side`).
-- **Multi-Engine Searchable OCR Layer**:
-  - **Apple Vision**: Ultra-fast native macOS neural text recognition for modern scripts and ecclesiastical Latin.
-  - **Tesseract OCR**: High-accuracy classical language support (Polytonic Ancient Greek `grc`, German Fraktur `deu_frak`/`frk`, Latin `lat`, English `eng`).
-  - **Dual Engine Synthesis**: Concurrently queries both engines and synthesizes observations—spatially merging bounding boxes, prioritizing classical polytonic Greek and Fraktur alphabets over Latin misrecognitions, and outputting in reading order.
-- **PDF Font Stream Deduplication**: Reuses a single canonical 12 pt base font scaled via affine transformation matrices, reducing output PDF file sizes from >5 MB down to ~1.4 MB.
-- **Metal GPU Acceleration**: Fast parallel morphological operations, integral image calculations, and dewarp mesh resampling accelerated by Apple Metal and Accelerate vImage, with a pure-Swift portable fallback.
-- **JSON Manifest & Non-Destructive Workflow**: Outputs a complete JSON processing manifest detailing all computed parameters (skew, split position, dewarp sag, content boxes, confidence scores). Supports per-page manual overrides and re-runs.
-- **Diagnostic Overlays**: Generates color-coded PNG diagnostic overlays highlighting detected text boxes, headers/footers, rejected noise, traced text lines, and gutter bounds.
+It is an independent project inspired by Scan Tailor, not a fork of it. Its executable is called `scantailor-cli`.
 
 ---
 
-## Installation & Building
+## What it does
+
+- **Cleans each page**: removes desk, finger, scanner-bed and page-edge shadows; corrects camera perspective; deskews (±0.05°); flattens uneven lighting; binarizes adaptively (Wolf-Jolion or Sauvola); dewarps curved pages near the spine.
+- **Splits spreads**: finds the gutter in two-page spreads and cuts out the crease.
+- **Lays the whole book out consistently**: pages share one size, are centered, and keep their running headers on the same line (see [Layout rules](#layout-rules)).
+- **Handles odd pages**: drops repository cover sheets (JSTOR, Project MUSE, Google Books, Internet Archive), keeps covers, plates and foldouts on their own page size, and removes blank pages only at the start and end.
+- **Adds a searchable text layer**: Apple Vision, Tesseract, or both together (polytonic Greek, Latin and Fraktur supported).
+- **Writes compact PDFs**: 300 DPI, 1-bit, CCITT Group 4, with one shared font for the whole invisible text layer.
+- **Is built for iteration**: a fast layout-only run, per-page reports, contact sheets, and an adjustments file for the cases automatic detection cannot settle. Repeat runs reuse a cache.
+
+---
+
+## Installation
 
 ### Requirements
-- **macOS 14.0 (Sonoma)** or later
-- **Swift 6.0** toolchain or Xcode 16+
-- **Tesseract OCR (optional, for Tesseract and Dual OCR engines)**:
-  ```bash
-  brew install tesseract
-  # Optional classical and European language packs:
-  brew install tesseract-lang
-  ```
+- macOS 14 (Sonoma) or later
+- Swift 6.0 toolchain (Xcode 16 or later)
+- Tesseract and Leptonica, for building and for the Tesseract OCR engine: `brew install tesseract`. For more languages: `brew install tesseract-lang`.
 
-### Build from Source
+### Homebrew (from v1.0.0)
 
-Clone the repository and compile the release binary using the Swift Package Manager:
+```bash
+brew tap AthanasiusOfAlex/scantailor-reborn
+brew install scantailor-reborn
+```
+
+### Build from source
 
 ```bash
 git clone https://github.com/AthanasiusOfAlex/ScanTailorReborn.git
 cd ScanTailorReborn
 swift build -c release
+cp .build/release/scantailor-cli /usr/local/bin/    # optional
 ```
 
-The compiled binary will be located at:
-```bash
-.build/release/scantailor-cli
-```
-
-Optionally install it into your `$PATH` (e.g. `/usr/local/bin`):
-```bash
-cp .build/release/scantailor-cli /usr/local/bin/
-```
-
-### Running Tests
+### Tests
 
 ```bash
-swift test
+scripts/test.sh fast      # quick suite
+swift test                # everything
 ```
 
 ---
 
-## CLI Usage
-
-ScanTailorReborn provides two primary commands: `process` and `inspect`.
+## Quick start
 
 ```bash
-scantailor-cli process <input.pdf> -o <output.pdf> [options]
-scantailor-cli inspect <manifest.json>
+scantailor-cli process book.pdf -o book-clean.pdf
 ```
+
+With no options this splits spreads, cleans, lays out, runs Apple Vision OCR and writes a 300 DPI 1-bit PDF. A cache in `~/Library/Caches/ScanTailorReborn` makes repeat runs fast.
+
+Scholarly book with Greek and Latin:
+
+```bash
+scantailor-cli process book.pdf -o book-clean.pdf --ocr-languages "grc+lat+eng"
+```
+
+(Naming a classical language picks `--ocr-engine dual` automatically.)
 
 ---
 
-### Command: `process`
+## Commands
 
-Processes an input PDF through the complete book-processing pipeline and outputs a clean 1-bit searchable PDF.
-
-```bash
+```
 scantailor-cli process <input.pdf> -o <output.pdf> [options]
+scantailor-cli inspect <manifest.json> [--pages] [--json]
+scantailor-cli --help
 ```
 
-#### Positional Arguments
+### `process`
 
-| Argument | Description |
+`scantailor-cli --help` prints the authoritative list. All options:
+
+**Output and reports**
+
+| Option | Meaning |
 | :--- | :--- |
-| `<input.pdf>` | Path to the source raw scan PDF file. |
+| `-o`, `--output <path>` | Output PDF (300 DPI, 1-bit, searchable). Required unless `--stop-after` is used. |
+| `--manifest <path.json>` | Write (or read) the JSON manifest of everything the run decided. |
+| `--diagnostics-dir <dir>` | Folder for the manifest and PNG overlays of low-confidence pages. |
+| `--all-diagnostics` | Overlays for every page, not just low-confidence ones. |
+| `--stop-after layout` | Plan the layout only: no rendering, OCR or PDF. Needs `--manifest` or `--diagnostics-dir`. Writes contact sheets. |
+| `--layout-sheets` | Also write layout contact sheets on a full run. |
+| `--timings` | Print elapsed time per pass and work time per stage. |
 
-#### Options
+**Choosing pages**
 
-| Flag / Option | Argument | Description |
-| :--- | :--- | :--- |
-| `-o`, `--output` | `<path>` | **Required.** Path to the output 300 DPI 1-bit searchable PDF. |
-| `--manifest` | `<path.json>` | Path to read an existing JSON manifest (for manual overrides) or write the resulting manifest. |
-| `--diagnostics-dir` | `<dir>` | Directory to save the processing manifest JSON and rendered diagnostic PNG overlays. |
-| `--all-diagnostics` | *None* | Forces diagnostic PNG overlay generation for **all** pages, not just pages flagged as low-confidence. |
-| `--split-mode` | `<mode>` | Page splitting mode for dual-page spreads. Choices: `automatic` (default), `single`, `spread`. |
-| `--gutter-trim-width` | `<px>` | Central gutter strip trimming width in pixels at 600 DPI (default: `24`). Excision of dark spine seams. |
-| `--margins` | `<spec>` | Publication margins relative to detected text, e.g. `"top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"`. Supports `in`, `pt`, `mm`, `px`, and `inner`/`outer`/`gutter` qualifiers. |
-| `--page-range` | `<range>` | 1-based source scan page range to process, e.g. `1-10`, `5..20`. |
-| `--exclude-pages` | `<list>` | Comma-separated 1-based source scan indices to skip, e.g. `1,2,5`. |
-| `--first-page-side` | `<side>` | Initial logical book side: `recto` (default) or `verso`. |
-| `--binarize` | `<method>` | Adaptive thresholding algorithm: `wolf` (default) or `sauvola`. |
-| `--no-auto-prune` | *None* | Disables automatic pruning of blank sub-page slices (retains empty flyleaves/halftitles). |
-| `--no-dewarp` | *None* | Disables 3D cubic-sheet spine curvature dewarping. Useful for flatbed scans or planar documents. |
-| `--no-ocr` | *None* | Disables OCR entirely. Output PDF will contain only binarized raster images without a text layer. |
-| `--ocr-engine` | `<engine>` | OCR engine selection: `apple` (default on macOS), `tesseract`, or `dual`. |
-| `--ocr-languages` | `<langs>` | Comma- or plus-separated language codes, e.g. `"grc+lat"`, `"en-US,de-DE"`, `"frk"`. Aliases: `--languages`, `--ocr-lang`. |
-| `--tessdata-dir` | `<path>` | Custom directory containing Tesseract `.traineddata` language models. |
-| `--portable-backend` | *None* | Forces the pure-Swift portable compute backend instead of Apple Metal GPU shaders. |
-| `-h`, `--help` | *None* | Displays command-line usage information and exits. |
+| Option | Meaning |
+| :--- | :--- |
+| `--page-range <range>` | 1-based source scans to process, e.g. `1-10` or `5..20`. |
+| `--exclude-pages <list>` | Scans to skip, e.g. `1,2,5`. |
+| `--cover-handling <mode>` | `auto` (default): drop repository cover sheets. `strip`: also drop an odd-sized printed cover. `keep`: drop none. |
+| `--no-auto-prune` | Keep blank pages at the start and end too. Blank pages *between* pages are always kept. |
+| `--first-page-side <side>` | `recto` (default) or `verso`. |
+| `--split-mode <mode>` | `automatic` (default), `single` or `spread`. |
+| `--gutter-trim-width <px>` | Strip cut from the spine crease, in px at 600 DPI (default 24). |
 
----
+**Page size and layout**
 
-### Detailed Option Explanations
+| Option | Meaning |
+| :--- | :--- |
+| `--margins <spec>` | Margins around the text block, e.g. `"top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"`, or `"0.5in"` for all four. Units: `in`, `pt`, `mm`, `cm`, `px`. Default: 0.25 in top and bottom, 0.5 in left and right. |
+| `--page-size <spec>` | Output trim size: a preset (`octavo`, `trade-paperback`, `royal-octavo`, `crown-octavo`, `a5`, `a4`, `b5`, `letter`) or `<w>x<h>` such as `6x9in` or `148x210mm`. |
+| `--content-box-size <w>x<h>` | Explicit text-block size, e.g. `4.5x7.5in`. |
+| `--input-dpi <dpi>` | True optical DPI of the source, for PDFs that wrap photos at 72 or 96 DPI. |
+| `--vertical-anchor <mode>` | `auto` (default): align full pages on their running header or first body line. `box-top`: align the tops of the text boxes (legacy). |
+| `--no-running-headers` | Turn off running-header detection (and with it, vertical registration). |
+| `--dimension-consensus <mode>` | `auto` (default): covers, plates and foldouts of another size stay out of the book's page size. `off`. |
+| `--outlier-pages <list\|none>` | Exact outlier pages (1-based output pages and scans, e.g. `1,45,89-91,s120L`). Replaces automatic detection completely. |
+| `--outlier-canvas <mode>` | `isolated` (default): each outlier gets its own page size. `shared`. |
+| `--outlier-tolerance <frac>` | Relative size difference that makes a page an outlier (default 0.08). |
 
-#### `--split-mode <mode>`
-Specifies how dual-page spreads should be detected and split into individual pages:
-- `automatic` / `auto` *(default)*: Analyzes aspect ratio and gutter shadow intensity to automatically determine if a source page is a two-page spread or a single page.
-- `single` / `singlepage`: Treats all source pages as single pages; disables spread splitting.
-- `spread` / `twopage`: Forces every source page to be split into two individual pages (recto and verso) along the detected gutter.
+**Image cleaning**
 
-#### `--gutter-trim-width <px>`
-Configures the physical strip excised from the central spine crease during spread splitting (default: `24` pixels at 600 DPI, approximately 1 mm).
-- When a physical book is photographed open, the spine crease leaves a dark vertical line. Slicing with zero width leaves dark line ink on the sliced boundaries.
-- The gutter trim width cuts out $W_{\text{gutter}} / 2$ pixels on both sides of the detected midline, preventing crease ink from reaching downstream layout analysis or appearing on page edges.
+| Option | Meaning |
+| :--- | :--- |
+| `--binarize <method>` | `wolf` (default) or `sauvola`. |
+| `--no-dewarp` | Skip curvature dewarping (flatbed scans). |
+| `--no-perspective` | Skip document-quad detection and perspective correction (alias `--no-quad`). |
+| `--no-desk-mask` | Skip desk/background masking before binarization. |
+| `--no-border-fallback` | Skip the fallback for pages with marginal geometry. |
 
-#### `--margins <spec>`
-Configures publication margins relative to the detected content box across all pages:
-- Format: Key-value pairs separated by commas, supporting units `in` (inches), `pt` (points), `mm` (millimeters), or `px` (pixels at 600 DPI).
-- Absolute margins: `"top=0.25in,bottom=0.25in,left=0.5in,right=0.5in"`
-- Book-binding (inner/outer) margins: `"top=0.25in,bottom=0.25in,inner=0.6in,outer=0.4in"`
-- Uniform shorthand: `"0.5in"` sets all four margins to 0.5 inches.
-- Defaults if omitted: **0.25 in** top/bottom, **0.50 in** left/right.
+**OCR**
 
-#### `--first-page-side <side>`
-Specifies whether the first processed page starts on the `recto` (right-hand, default) or `verso` (left-hand) side of a book spread. This controls the alternating inner/outer binding margins throughout the document.
+| Option | Meaning |
+| :--- | :--- |
+| `--no-ocr` | No text layer. |
+| `--ocr-engine <engine>` | `apple` (default), `tesseract` or `dual`. |
+| `--ocr-languages <langs>` | `"grc+lat"`, `"en-US,de-DE"`, `"frk"`. Aliases `--languages`, `--ocr-lang`. |
+| `--tessdata-dir <path>` | Folder of `.traineddata` files. |
 
-#### `--page-range <range>` & `--exclude-pages <list>`
-- `--page-range 5-20` (or `5..20`): Restricts processing to a subset of source scans.
-- `--exclude-pages 1,2`: Explicitly skips specified 1-based source scan pages (such as blank cover scans, color calibration cards, or digital covers).
+**Performance**
 
-#### `--no-auto-prune`
-By default, ScanTailorReborn automatically prunes blank sub-page slices (slices with foreground ink density $< 0.5\%$ and 0 recognized OCR words), eliminating phantom empty pages caused by single title pages scanned on flatbeds. Providing `--no-auto-prune` preserves these blank slices in the output PDF.
+| Option | Meaning |
+| :--- | :--- |
+| `-j`, `--jobs <n>` | Scans and pages handled at once (default 4). Results never depend on it; memory grows with it. |
+| `--cache-dir <dir>` | Cache location (default `~/Library/Caches/ScanTailorReborn`). Safe to delete. |
+| `--no-cache` | Compute everything, store nothing. |
+| `--portable-backend` | Pure-Swift compute instead of Metal. |
 
-#### `--ocr-engine <engine>`
-Selects the OCR engine for text recognition:
-- `apple` *(default on macOS)*: Uses Apple's Vision framework (`VNRecognizeTextRequest`). Highly optimized on Apple Silicon, excellent for English, French, German, and Ecclesiastical Latin.
-- `tesseract`: Uses `libtesseract` via pure Swift 6 C-FFI. Supports classical languages such as Polytonic Ancient Greek (`grc`) and Fraktur (`deu_frak`/`frk`).
-- `dual`: Runs both Apple Vision and Tesseract concurrently, merging results spatially. Classical Greek and Fraktur scripts take precedence over Latin misrecognitions, while standard Latin text benefits from Apple Vision's neural engine.
+**Adjustments**
 
-#### `--ocr-languages <langs>` (Aliases: `--languages`, `--ocr-lang`)
-Specifies the language codes for OCR. Accepts comma-separated or plus-separated strings:
-- Tesseract codes: `grc` (Ancient Greek), `lat` (Latin), `deu_frak` or `frk` (German Fraktur), `eng` (English), `deu` (German).
-- Apple Vision codes: BCP-47 codes such as `en-US`, `de-DE`, `fr-FR`, `la`.
-- When classical language codes (`grc`, `deu_frak`, `frk`) are specified and `--ocr-engine` is omitted, ScanTailorReborn automatically selects `--ocr-engine dual` to ensure optimal coverage.
+| Option | Meaning |
+| :--- | :--- |
+| `--apply-manifest <file>` | Apply an [adjustments file](#adjustments-file). Flags on the command line win over its `book` section. A complete manifest from an earlier run is also accepted. |
 
-#### `--tessdata-dir <path>`
-Specifies a custom directory containing Tesseract `.traineddata` files. Defaults to Homebrew's standard path (`/opt/homebrew/share/tessdata` or `/usr/local/share/tessdata`) or `$TESSDATA_PREFIX`.
+### `inspect`
 
-#### `--binarize <method>`
-Selects the adaptive thresholding algorithm used to separate ink from background paper:
-- `wolf` / `wolf-jolion` *(default)*: Christian Wolf and Jean-Michel Jolion binarization. Highly resilient against uneven page lighting, gutter shadows, and gradient illumination.
-- `sauvola`: Jaakko Sauvola adaptive thresholding. Computes thresholds based on local standard deviation.
-
-#### `--no-dewarp`
-Bypasses the 3D cylindrical sheet dewarper. By default, ScanTailorReborn traces baseline curvature across horizontal text lines, fits a cubic polynomial sag model, and unrolls curved book page margins. If your input documents were scanned on a flatbed scanner or are already flat, use `--no-dewarp` for faster execution.
-
-#### `--no-ocr`
-Omits the OCR pass entirely. Passes `--no-ocr` to skip text recognition and speed up processing.
-
-#### `--manifest <path.json>`
-Path to a JSON processing manifest file. 
-- When providing a path to a file that does not yet exist, ScanTailorReborn writes the complete pipeline configuration and per-page metrics (skew angles, split coordinates, dewarp sag, content boxes, layout tiers, and confidence ratings) to this file.
-- When pointing to an existing manifest file, ScanTailorReborn loads the parameters and allows you to apply manual adjustments or inspect prior run data.
-
-#### `--diagnostics-dir <dir>`
-Specifies a directory where diagnostic outputs are placed. When specified, ScanTailorReborn automatically outputs:
-1. `<stem>-manifest.json`: Complete book layout and processing manifest.
-2. `page-XXXX-diag.png`: Color-coded 600 DPI diagnostic overlays for flagged (low-confidence) pages showing content bounding boxes, header/footer bounds, noise rejections, and traced text lines.
-
-#### `--all-diagnostics`
-By default, diagnostic PNG overlays are only generated for pages with confidence ratings below the threshold (`< 0.60`). Providing `--all-diagnostics` renders diagnostic PNGs for **every** output page in `--diagnostics-dir`.
-
-#### `--portable-backend`
-Disables Apple Metal GPU compute kernels and runs portable, pure-Swift morphological and raster algorithms. Useful for running on systems without active GPU acceleration or for cross-platform portability verification.
-
----
-
-### Command: `inspect`
-
-Inspects a previously saved JSON processing manifest and prints an ASCII summary of book dimensions, canonical margin frames, and per-page metrics.
+Prints a summary of a saved manifest.
 
 ```bash
-scantailor-cli inspect <manifest.json>
-```
-
-#### Example Output:
-
-```text
-=== ScanTailorReborn Manifest Summary ===
-Processing DPI: 600 | Output DPI: 300
-Canonical 600 DPI Canvas: 4960 x 7016 px
-Verso Canonical Text Frame: 3720 x 5612 at (620, 702)
-Recto Canonical Text Frame: 3720 x 5612 at (620, 702)
-Total Output Pages: 12 (from 6 source scan(s))
------------------------------------------
-Page 1 (src #1, verso): tier=body, skew=+0.12°, dewarp=yes (sag 14.2px), conf=0.94
-Page 2 (src #1, recto): tier=body, skew=-0.08°, dewarp=yes (sag 12.8px), conf=0.96
-Page 3 (src #2, verso): tier=body, skew=+0.05°, dewarp=yes (sag 18.5px), conf=0.91
-Page 4 (src #2, recto): tier=chapterOpening, skew=+0.02°, dewarp=yes (sag 8.1px), conf=0.88
-Page 5 (src #3, verso): tier=body, skew=-0.15°, dewarp=yes (sag 42.0px), conf=0.55 [FLAGGED]
+scantailor-cli inspect d/book-layout-manifest.json            # summary
+scantailor-cli inspect d/book-layout-manifest.json --pages    # one line per page: size, margins, tier, flags
+scantailor-cli inspect d/book-layout-manifest.json --json     # machine-readable
 ```
 
 ---
 
-## Common Workflows & Examples
+## Layout rules
 
-### 1. Standard Book Processing with Dual-Engine Classical OCR
+These are applied to the whole book after every page has been analyzed.
 
-Process dual-page spreads containing scholarly Greek, Latin, and English text into a compact, searchable PDF:
+1. **The canvas hugs the text.** Its size is the largest clean text block in the book, plus **0.25 in top and bottom** and **0.5 in left and right** (or your `--margins`). It is not the size of the scanned paper.
+2. **Every page is centered** left to right on that canvas, whichever side of the spread it came from. Inner and outer margins add to the canvas width but pages are not shifted toward the spine.
+3. **Pages with a running header hang from the top.** Full pages are registered on their header (or first body line), so text does not jump when you page through.
+4. **Pages without a header that run to the foot sit on the bottom.** This covers chapter and section openings.
+5. **Floating pages keep their offset.** Title pages, dedications and similar pages keep their place relative to the text block.
+6. **Outliers get their own size.** Covers, plates and foldouts do not distort the book's page size.
+7. **Blank pages** are dropped only before the first and after the last page with content; kept blanks stay blank.
+8. **Manual edits beat automatic detection.** Whatever the detector decides, an adjustments-file entry or an exact `--outlier-pages` list wins.
 
-```bash
-scantailor-cli process book_greek_latin.pdf \
-  -o cleaned_scholarly.pdf \
-  --ocr-engine dual \
-  --ocr-languages "grc+lat+eng"
-```
+---
 
-### 2. German Fraktur Text with Custom Gutter Trimming
+## Iterating on a hard book
 
-Process an antique 19th-century German volume printed in Fraktur with a deep binding crease:
-
-```bash
-scantailor-cli process goethe_fraktur.pdf \
-  -o cleaned_goethe.pdf \
-  --ocr-engine dual \
-  --ocr-languages "deu_frak+deu" \
-  --gutter-trim-width 32
-```
-
-### 3. Custom Publication Margins (Inner / Outer Binding Clearance)
-
-Prepare a book scan for high-quality printing and binding with extra inner margin clearance:
+The pipeline is designed for a loop in which a person or an agent looks at cheap previews and fixes only what is wrong.
 
 ```bash
-scantailor-cli process raw_scans.pdf \
-  -o print_ready.pdf \
-  --margins "top=0.3in,bottom=0.3in,inner=0.6in,outer=0.4in" \
-  --first-page-side recto
+# 1. Plan the layout only. No PDF, no OCR; fast.
+scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/
+
+# 2. Review it.
+scantailor-cli inspect d/book-layout-manifest.json --pages
+#    and open d/layout-sheet-01.png, ...
+#    (red: canonical frame, green: text block, orange: outlier)
+
+# 3. Write adjustments.json for the pages that need it, then repeat step 1
+#    with --apply-manifest adjustments.json (repeats are fast: unchanged scans come from the cache).
+scantailor-cli process book.pdf --stop-after layout --diagnostics-dir d/ --apply-manifest adjustments.json
+
+# 4. Satisfied? Write the PDF (OCR is reused for unchanged pages).
+scantailor-cli process book.pdf -o book-clean.pdf --apply-manifest adjustments.json
 ```
 
-### 4. Excluding Digital Cover Pages & Selective Page Range
+Pages with low confidence also get PNG overlays in the diagnostics folder: green is the main text box, blue retained headers and side clusters, red rejected noise, magenta traced text lines.
 
-Skip the first JSTOR cover page and process only pages 2 through 16:
+### Adjustments file
+
+Strict JSON. Keys starting with `_` and the key `note` are ignored, so you can annotate freely.
+
+```json
+{
+  "version": 1,
+  "book":  { "page-size": "octavo", "margins": "0.75in", "outlier-pages": "1,s45L" },
+  "scans": { "s12": { "split": "single" },
+             "s30": { "splitX": "52%", "disableRectification": true } },
+  "pages": { "s45L": { "skew": -0.4,
+                       "contentBox": { "nudge": { "top": "-2mm", "bottom": "+0.1in" } } },
+             "77":   { "tier": "standaloneFloating", "keep": true },
+             "s88":  { "contentBox": { "rect": ["1.0in", "1.2in", "4.1in", "6.6in"] },
+                       "offset": { "y": "+1mm" } } }
+}
+```
+
+- **Page names.** `"45"` is output page 45 of the run you are looking at. `"s12"` is scan 12 of the source PDF, counted from the start of the PDF even with `--page-range`. `"s12L"` and `"s12R"` are the left and right halves of a split scan. Prefer scan names: they survive changes in splitting or pruning. More specific names win (`s12L` over `s12`).
+- **`book`**: any ordinary option, with the flag name as key (without `--`).
+- **`scans`**: `split` (`single`, `spread`, `auto`), `splitX` (`"52%"` or a length), `disableRectification`, `disableDeskMask`.
+- **`pages`**: `skew` (degrees), `disableDewarp`, `contentBox.rect` `[left, top, right, bottom]`, `contentBox.nudge` `{top, left, bottom, right}` (positive moves an edge right or down), `offset` `{x, y}`, `tier` (`fullBody`, `edgeAnchoredPartial`, `standaloneFloating`), `outlier` (true or false), `pageSize` (an outlier's own size, same aspect), `keep`, `drop`, `runningHeader` (`automatic`, `present`, `absent`), `verticalRegistration` (`automatic`, `anchor`, `boxTop`), `borderFallback` (`automatic`, `forced`, `disabled`).
+- **Lengths** need a unit: `in`, `mm`, `cm`, `pt`, `px` (pixels of the 600 DPI processing raster).
+- Mistakes are reported all at once, with suggestions, before any scan is processed. The run prints which entries were applied and which were ignored (and why), and the manifest records the same.
+
+---
+
+## Examples
+
+Cover and page selection:
 
 ```bash
-scantailor-cli process article.pdf \
-  -o article_clean.pdf \
-  --exclude-pages 1 \
-  --page-range 2-16
+scantailor-cli process article.pdf -o clean.pdf --exclude-pages 1 --page-range 2-16
 ```
 
-### 5. Flatbed Scans (No Dewarping Needed)
-
-For flatbed scans or planar sheets where pages have no spine curvature:
+Flatbed scans, no dewarping or perspective correction:
 
 ```bash
-scantailor-cli process flatbed_scan.pdf -o cleaned_flatbed.pdf --no-dewarp
+scantailor-cli process flatbed.pdf -o clean.pdf --no-dewarp --no-perspective
 ```
 
-### 6. Reviewing Flagged Pages with Diagnostic Overlays
-
-Save diagnostic overlays and the JSON manifest to inspect pages that might need manual review:
+Fraktur with a deep binding crease:
 
 ```bash
-scantailor-cli process book.pdf -o output.pdf --diagnostics-dir ./diagnostics
+scantailor-cli process goethe.pdf -o clean.pdf --ocr-languages "deu_frak+deu" --gutter-trim-width 32
 ```
 
-Open `./diagnostics/page-0005-diag.png` to inspect flagged pages. Overlays use color coding:
-- **Green**: Detected main body text box.
-- **Blue**: Retained header/footer and side clusters.
-- **Red**: Rejected border noise, fingers, shadows, or edge artifacts.
-- **Magenta**: Traced text lines used for spine curvature dewarping.
+Fixed output size and wider margins:
+
+```bash
+scantailor-cli process raw.pdf -o print.pdf --page-size 6x9in --margins "top=0.3in,bottom=0.3in,left=0.6in,right=0.6in"
+```
+
+Smartphone photos wrapped in a PDF at 72 DPI, with a known source resolution:
+
+```bash
+scantailor-cli process photos.pdf -o clean.pdf --input-dpi 300
+```
+
+---
+
+## Using it with an AI agent
+
+The repository includes an agent skill that teaches an agent to drive the loop above: plan, inspect, write an adjustments file, repeat. It is installed in this repo under `.claude/skills/scantailor-reborn` (and mirrored in `.agents/skills/`), and is also packaged as a Claude Code plugin:
+
+```
+/plugin marketplace add AthanasiusOfAlex/ScanTailorReborn
+/plugin install scantailor-reborn@scantailor-reborn
+```
+
+The skill needs `scantailor-cli` on your `PATH` and says how to install it if it is missing.
 
 ---
 
 ## Architecture
 
-The project is structured into modular Swift packages adhering to pure Swift 6 strict concurrency (`-strict-concurrency=complete`):
-
 ```
 Sources/
-├── CTesseract/                # C bridging header & modulemap for libtesseract and liblept
-├── ScanTailorContracts/       # Pure Swift geometric, raster, OCR, and protocol primitives (Zero platform imports)
-├── ScanTailorCore/            # Core algorithms: deskew, split, binarize, dewarp, layout (Zero platform imports)
-├── ScanTailorPortableBackend/ # Portable pure-Swift CPU compute implementation (Zero platform imports)
-├── ScanTailorAppleBackend/    # macOS Metal GPU acceleration, Apple Vision OCR, and PDFKit/CoreGraphics I/O
-├── ScanTailorTesseractBackend/# Swift 6 libtesseract C-FFI wrapper, LeptonicaPix RAII, and TesseractOCREngine
-├── ScanTailorPipeline/        # Multi-stage book pipeline coordinator, DualOCREngine, and manifest engine
-└── ScanTailorCLI/             # Command-line interface executable (scantailor-cli)
+├── CTesseract/                 # C bridge to libtesseract and liblept
+├── ScanTailorContracts/        # Geometry, raster, OCR types and protocols (no platform imports)
+├── ScanTailorCore/             # Algorithms: deskew, split, binarize, dewarp, layout (no platform imports)
+├── ScanTailorPortableBackend/  # Pure-Swift CPU compute
+├── ScanTailorAppleBackend/     # Metal, Apple Vision OCR, PDFKit/CoreGraphics I/O
+├── ScanTailorTesseractBackend/ # Tesseract C-FFI wrapper
+├── ScanTailorPipeline/         # Pass coordinator, dual OCR engine, manifest
+└── ScanTailorCLI/              # The scantailor-cli executable
 ```
 
 ---
 
-## Documentation & Changelog
+## Documentation
 
-- [**Changelog & Architectural Evolution**](CHANGELOG.md): Comprehensive development history, initial benchmark case studies (*Flannery 1993*, *Vermeersch 1934*), mathematical analysis of layout/confidence metrics, and full implementation record across Phases 1, 2, and 3.
-
----
+- [Handoff notes](docs/HANDOFF.md): how each stage works, with the decisions behind it.
+- [White paper](docs/WHITE_PAPER.md): goals, release criteria and the development plan.
+- [Changelog](CHANGELOG.md)
 
 ## License
 
-This project is licensed under the [MIT License](LICENCE.md).
-
-Copyright (c) 2026 **AthanasiusOfAlex**.
+[MIT License](LICENCE.md). Copyright (c) 2026 **AthanasiusOfAlex**.

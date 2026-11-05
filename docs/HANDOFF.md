@@ -283,16 +283,23 @@ Goal: an agent iterating with `--apply-manifest` / `--stop-after layout` should 
 
 ---
 
+### 3.16 Recently Completed: Substep 7.2.1 (CLI Documentation and Agent Skill)
+1. **README** ([README.md](../README.md)) rewritten from `usageText`: every flag in `--help` is documented (checked by a script that greps each `--flag`), plus `inspect --pages/--json`, the layout rules, the iterate loop and the adjustments file. The loop was run on Flannery 1993 pp. 1–8 (`--stop-after layout`, then with `--apply-manifest`); output names are `<stem>-layout-manifest.json`, `layout-sheet-NN.png`, `page-NNNN-diag.png`. The `-o` help line no longer says "300 DPI 1-bit" in a misleading position.
+2. **Skill** `scantailor-reborn`: canonical copy in [plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md](../plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md); mirrored into `.claude/skills/` and `.agents/skills/` by [scripts/sync-skill.sh](../scripts/sync-skill.sh) (run it after editing the canonical copy). It starts by checking `command -v scantailor-cli` and, if missing, stops and gives the install commands.
+3. **Plugin**: [.claude-plugin/marketplace.json](../.claude-plugin/marketplace.json) plus [plugins/scantailor-reborn/.claude-plugin/plugin.json](../plugins/scantailor-reborn/.claude-plugin/plugin.json). Install: `/plugin marketplace add AthanasiusOfAlex/ScanTailorReborn`, then `/plugin install scantailor-reborn@scantailor-reborn`. Plugins cannot declare a required program, hence the check in the skill. Not yet tried against a published remote.
+4. **White paper**: criteria 2, 3 and 5 reworded to the implemented rules (inner/outer margins widen the canvas but pages are centered, not mirrored); Substep 7.2.3 (Homebrew tap) added; models updated.
+5. **Open point**: the original Scan Tailor also ships a `scantailor-cli`, so the binary name can clash. The tap and formula are named `scantailor-reborn`; renaming the executable is undecided.
+
+---
+
 ## 4. Next Milestone Resume Prompt
 
-To begin **Phase 7, Substep 7.1.1**, copy and provide the following prompt:
+To begin **Phase 7, Substep 7.2.2**, copy and provide the following prompt:
 
 ```markdown
-We are resuming ScanTailorReborn on Substep 7.1.1 — Multi-Document Benchmark Validation.
+We are resuming ScanTailorReborn on Substep 7.2.2 — Version Tagging & CHANGELOG.md Finalization.
 
-1. Read `.claude/skills/swift-expert/SKILL.md` in full before modifying Swift code.
-2. Review `docs/HANDOFF.md` (Sections 1.3, 2–3, especially §3.13–3.15) and `docs/WHITE_PAPER.md` Phase 7 and the 10 v1.0 release criteria. Use `scripts/test.sh fast` for the inner loop; run `scripts/test.sh debug` once in the background before committing.
-3. Goal: process Flannery 1993, Vermeersch 1934 and Simpson 1968 end to end and check each v1.0 release criterion in automated (opt-in corpus) tests. Use short samples where a criterion allows it; use `--jobs` and the cache (Substep 6.3.2) to keep runs short. Propose which criterion is checked how, on which pages, and the expected run time. Pause for approval before implementing.
-4. After approval, implement with tests, confirm all tests pass with 0 warnings.
-5. Update `docs/HANDOFF.md`, report concisely with clickable file links, and pause before 7.1.2.
+1. Review `docs/HANDOFF.md` (§3 and the commit history from Phase 4 on) and `docs/WHITE_PAPER.md` Phase 7.
+2. Goal: finalize `CHANGELOG.md` for Phases 4–7 (accurate, grouped by phase), then tag `v1.0.0`. Propose the outline first and pause for approval; commit and push only when asked, and ask before pushing the tag.
+3. Then 7.2.3 (Homebrew tap) needs the pushed tag.
 ```

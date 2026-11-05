@@ -1112,7 +1112,7 @@ public struct ScanTailorCLI {
       scantailor-cli inspect <manifest.json> [--pages] [--json]
 
     PROCESS OPTIONS:
-      -o, --output <path>          Output 300 DPI 1-bit searchable PDF path (required unless --stop-after)
+      -o, --output <path>          Output PDF path (300 DPI, 1-bit, searchable) (required unless --stop-after)
       --apply-manifest <file>      Apply an adjustments file (JSON) of per-scan and per-page edits; its "book" section
                                    holds ordinary options (flags on the command line win). A complete manifest from an
                                    earlier run is also accepted. See "ADJUSTMENTS FILE" below.

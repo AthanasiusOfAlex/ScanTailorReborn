@@ -199,18 +199,18 @@ graph TD
    - The outer boundary of the physical paper sheet must be resolved before binarization and content detection.
 
 2. **Phantom Page Removal & Cover Page Exclusion**:
-   - Automatic pruning of blank sub-page slices (e.g., flatbed scan lids, blank facing pages) must operate with 0 false negatives, combining ink density ($\le 1.0\%$) with substantive letter-based OCR confirmation.
+   - Blank pages are dropped only before the first and after the last page with content (partial scans, stripped covers); blank pages between content pages are kept in order and laid out blank. `--no-auto-prune` keeps the leading and trailing ones too.
    - The CLI and agent manifest must provide first-class facilities (`--exclude-pages`, `--cover-handling`) to detect and cleanly separate digital repository covers (e.g., JSTOR, Google Books) from the book body.
 
 3. **Publication Margin Standardization**:
-   - Ordinary pages must be standardized to publication margins relative to the detected content box (defaulting to **$0.25''$ top/bottom** and **$0.50''$ left/right**, or user-specified `--margins`).
-   - Facing pages must mirror inner/outer margins to ensure proper gutter clearance for physical printing or two-up digital reading.
+   - The output canvas is the largest clean text block of the book plus publication margins (defaulting to **$0.25''$ top/bottom** and **$0.50''$ left/right**, or user-specified `--margins`), not the size of the scanned paper.
+   - Every page is centered left to right on that canvas. Inner/outer margins contribute to the canvas width but do not shift pages toward the spine.
 
 4. **Running Header Top Alignment for Ordinary Pages**:
    - Ordinary full-body pages must be vertically aligned by their running top headers (or uppermost baseline of body text when headers are absent), ensuring that pages do not "jump" or jitter vertically when paging through a digital document.
 
 5. **Anomalous Page Sinkage Preservation**:
-   - Anomalous pages—such as chapter openers, part title pages, epigraphs, and end-of-chapter conclusions (`edgeAnchoredPartial` and `standaloneFloating` tiers)—must preserve their intentional artistic sinkage and horizontal centering relative to the canonical frame, rather than being forced to the top header line.
+   - Pages with a running header hang from the top. Headerless chapter and section openings that run to the foot of the page sit on the bottom of the frame, and chapter endings hang from the top. Floating pages (title pages, dedications, epigraphs; `standaloneFloating`) keep their offset from the text block. Hard cases are settled by the adjustments file (`--apply-manifest`), and manual edits always beat automatic detection.
 
 6. **Canonical Page Dimensions & Outlier Isolation**:
    - All ordinary pages within a volume must share an identical canonical PDF trim size (e.g., matching the median/IQR consensus dimensions).
@@ -378,13 +378,17 @@ To advance **ScanTailorReborn** from its current v2.0 baseline to complete **v1.
 
 #### Step 7.2: Release Documentation & Changelog Finalization
 - **Substep 7.2.1: CLI Documentation & AI Agent Skill Reference**
-  - *Description*: Update [README.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/README.md) and agent skill instructions with comprehensive documentation of new CLI options, manifest schema, and agentic workflows.
-  - *Proposed Model*: **Flash**
+  - *Description*: Rewrite [README.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/README.md) to match `--help`, document the adjustments file and the iterate loop, and add the `scantailor-reborn` agent skill (in `.claude/skills/`, `.agents/skills/` and packaged as a Claude Code plugin; it checks that `scantailor-cli` is installed).
+  - *Proposed Model*: **Sonnet**
+  - *Effort Level*: **Medium**
+- **Substep 7.2.2: Executable Rename, Version Tagging & CHANGELOG.md Finalization**
+  - *Description*: First rename the executable from `scantailor-cli` to `scantailor-reborn-cli` (avoids a clash with the original Scan Tailor; "cli" stays in case a GUI follows) across `Package.swift`, sources, scripts, README, the skill and its mirrors, and the HANDOFF. Then finalize [CHANGELOG.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/CHANGELOG.md) documenting Phases 4 through 7, tag the Git repository with `v1.0.0`, and certify production readiness.
+  - *Proposed Model*: **Sonnet**
   - *Effort Level*: **Low**
-- **Substep 7.2.2: Version Tagging & CHANGELOG.md Finalization**
-  - *Description*: Finalize [CHANGELOG.md](file:///Users/louismelahn/Antigravity/ScanTailorReborn/CHANGELOG.md) documenting Phases 4 through 7, tag the Git repository with `v1.0.0`, and certify production readiness.
-  - *Proposed Model*: **Flash**
-  - *Effort Level*: **Low**
+- **Substep 7.2.3: Homebrew Tap**
+  - *Description*: Publish the `AthanasiusOfAlex/homebrew-scantailor-reborn` tap with a `scantailor-reborn` formula that builds the `v1.0.0` tarball (`depends_on "tesseract"`, `xcode: :build`, `macos: :sonoma`); verify with `brew install --build-from-source` and `brew test`.
+  - *Proposed Model*: **Sonnet**
+  - *Effort Level*: **Medium**
 
 ---
 
@@ -409,8 +413,9 @@ To advance **ScanTailorReborn** from its current v2.0 baseline to complete **v1.
 | **6.3.2: Cache-Accelerated Sub-2s Re-Rendering** | Caches pipeline intermediates for instant agentic re-renders and tweaks | **Argon** | **High** |
 | **7.1.1: Multi-Document Benchmark Validation** | Executes automated test runs on Flannery, Vermeersch, and Simpson | **Flash** | **Medium** |
 | **7.1.2: Visual & Metric Inspection** | Evaluates diagnostic overlays and PDFs against the 10 v1.0 criteria | **Argon** | **Medium** |
-| **7.2.1: CLI Documentation & Agent Skill Reference** | Documents new CLI options, manifest schema, and agent operating guide | **Flash** | **Low** |
-| **7.2.2: Version Tagging & CHANGELOG Finalization** | Finalizes CHANGELOG.md for Phases 4–7 and tags Git release `v1.0.0` | **Flash** | **Low** |
+| **7.2.1: CLI Documentation & Agent Skill Reference** | Documents new CLI options, manifest schema, and agent operating guide | **Sonnet** | **Medium** |
+| **7.2.2: Executable Rename, Version Tagging & CHANGELOG** | Finalizes CHANGELOG.md for Phases 4–7 and tags Git release `v1.0.0` | **Sonnet** | **Low** |
+| **7.2.3: Homebrew Tap** | Tap repository and formula building the `v1.0.0` tarball | **Sonnet** | **Medium** |
 
 ---
 
@@ -443,10 +448,11 @@ This is not a straight Argon → Opus, Flash → Haiku substitution:
 | **6.3.2: Cache-Accelerated Sub-2s Re-Rendering** | Argon / High | **Opus** | **high** | Cache keys, invalidation, and actor-isolated intermediates under a hard latency budget. |
 | **7.1.1: Multi-Document Benchmark Validation** | Flash / Medium | **Sonnet** | **medium** | Long-running scripted runs with structured result interpretation. |
 | **7.1.2: Visual & Metric Inspection** | Argon / Medium | **Opus** | **medium** | Judging diagnostic overlays and PDFs against the 10 criteria benefits from Opus's vision. |
-| **7.2.1: CLI Documentation & Agent Skill Reference** | Flash / Low | **Sonnet** | **low** | The agent skill reference must be exactly accurate to the CLI; Sonnet verifies against source. |
-| **7.2.2: Version Tagging & CHANGELOG Finalization** | Flash / Low | **Haiku** | **low** | Mechanical summarization of commit history and tagging. |
+| **7.2.1: CLI Documentation & Agent Skill Reference** | Flash / Low | **Sonnet** | **medium** | The agent skill reference must be exactly accurate to the CLI; Sonnet verifies against source. |
+| **7.2.2: Executable Rename, Version Tagging & CHANGELOG** | Flash / Low | **Sonnet** | **low** | Summarizing four phases of history accurately; the tagging is trivial. |
+| **7.2.3: Homebrew Tap** | n/a | **Sonnet** | **medium** | Short, but clean-install build failures need real debugging. |
 
-**Summary:** 8 substeps on Opus (1 at `xhigh`), 10 on Sonnet, 1 on Haiku. Phase 4 is complete; of the remaining work (5.1.1 onward), 5 substeps are on Opus, 8 on Sonnet, and 1 on Haiku.
+**Summary:** 8 substeps on Opus (1 at `xhigh`), 12 on Sonnet, none on Haiku. Phase 4 is complete; of the remaining work (5.1.1 onward), 5 substeps are on Opus and 10 on Sonnet.
 
 ---
 
