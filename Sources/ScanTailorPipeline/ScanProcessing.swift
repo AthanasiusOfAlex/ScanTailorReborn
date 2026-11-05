@@ -404,7 +404,16 @@ extension BookPipelineCoordinator {
 
         // 1d. Blank check: run on every low-ink page; whether it prunes depends on the page's edits.
         let totalPixels = finalCleaned.width * finalCleaned.height
-        let inkDensity = totalPixels > 0 ? Double(finalCleaned.countBlackPixels()) / Double(totalPixels) : 0.0
+        var inkPixels = finalCleaned.countBlackPixels()
+        if Double(inkPixels) >= configuration.blankPageInkDensityThreshold * Double(totalPixels),
+           detection.holdsOnlySpecks(dpi: configuration.processingDPI) {
+            // A verso that shows only the edges of the following leaves: their ink is not the page's.
+            let scale = Double(max(72, configuration.processingDPI)) / 600.0
+            for band in ContentBoxDetector.edgeStackBands(in: finalCleaned, splitSide: side, scale: scale) {
+                inkPixels -= finalCleaned.cropped(to: band).countBlackPixels()
+            }
+        }
+        let inkDensity = totalPixels > 0 ? Double(inkPixels) / Double(totalPixels) : 0.0
         var isBlank: Bool? = nil
         if configuration.autoPruneBlankPages && inkDensity < configuration.blankPageInkDensityThreshold {
             let noContent = detection.contentBox == nil || detection.retainedClusters.isEmpty

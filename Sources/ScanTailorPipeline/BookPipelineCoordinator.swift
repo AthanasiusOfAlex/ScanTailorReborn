@@ -1598,16 +1598,29 @@ public struct BookPipelineCoordinator: Sendable {
             }
         }
 
+        // 1b-iii. A blank page kept between pages (or between covers) is laid out blank: the fibres and specks the
+        // detector found on it would otherwise make a text block, a skew and an own canvas of their own. An edited
+        // content box keeps the page as content.
+        let automaticDetections = numbered.map { page -> ContentBoxDetector.DetectionResult in
+            let slice = scanResults[page.sourceIndex].slices[page.sliceIndex]
+            let edited = page.manualOverride?.overrideContentBox != nil || page.manualOverride?.contentBoxNudge != nil
+            guard slice.isBlank == true, !edited, slice.detection.holdsOnlySpecks(dpi: configuration.processingDPI) else {
+                return slice.detection
+            }
+            return slice.detection.blanked
+        }
+
         // 1c. Camera photos: every page's text block at the book's size (Substep 7.1.1b-i). Perspective shows the
         // pages of one photo at different scales, so each camera page is resampled before anything measures it.
         // Scales come from the automatic detection; content-box edits below refer to the resampled page, the one
         // `inspect` shows.
         let textBlockScales: [Size2D?] = configuration.cameraTextBlockScaling.map { scaling in
             TextBlockScaleNormalizer.scales(
-                for: numbered.map { page in
-                    TextBlockScaleNormalizer.PageInput(
+                for: numbered.indices.map { k in
+                    let page = numbered[k]
+                    return TextBlockScaleNormalizer.PageInput(
                         group: page.sourceIndex,
-                        contentBox: scanResults[page.sourceIndex].slices[page.sliceIndex].detection.contentBox,
+                        contentBox: automaticDetections[k].contentBox,
                         isEligible: scanResults[page.sourceIndex].header.geometry.looksLikeCameraPhoto
                     )
                 },
@@ -1638,7 +1651,8 @@ public struct BookPipelineCoordinator: Sendable {
             let finalCleaned = resampledBitmaps[k] ?? slice.cleaned
             let pageSize = Size2I(width: finalCleaned.width, height: finalCleaned.height)
             var manualOverride = page.manualOverride
-            var detection = textBlockScale.map { TextBlockScaleNormalizer.scaled(slice.detection, by: $0, within: pageSize) } ?? slice.detection
+            var detection = textBlockScale.map { TextBlockScaleNormalizer.scaled(automaticDetections[k], by: $0, within: pageSize) }
+                ?? automaticDetections[k]
             let tracedLines = textBlockScale.map { scale in
                 slice.tracedLines.map { line in
                     PolyLine2D(points: line.points.map { Point2D(x: $0.x * scale.width, y: $0.y * scale.height) })

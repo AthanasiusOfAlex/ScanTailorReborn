@@ -107,6 +107,29 @@ public struct ContentBoxDetector: Sendable {
             self.confidence = min(max(0.0, confidence), 1.0)
         }
 
+        /// Whether every retained cluster is shorter than `maxHeightInches`: paper fibres, dust and specks, but
+        /// not a line of type, a page number or a drawing.
+        /// - Parameters:
+        ///   - dpi: Resolution of the bitmap the clusters were measured on.
+        ///   - maxHeightInches: Tallest cluster still taken for a speck (default 0.1 in; on the sample books
+        ///     specks reach 0.09 in and the smallest real content 0.11 in).
+        /// - Returns: `true` also when nothing was retained.
+        public func holdsOnlySpecks(dpi: Int, maxHeightInches: Double = 0.1) -> Bool {
+            let limit = maxHeightInches * Double(dpi)
+            return retainedClusters.allSatisfy { Double($0.exactBounds.height) < limit }
+        }
+
+        /// The same detection with nothing retained: the page is laid out as a blank page. The clusters it held
+        /// are kept among the rejected boxes for the diagnostic overlays.
+        public var blanked: DetectionResult {
+            DetectionResult(
+                contentBox: nil,
+                mainBodyBox: nil,
+                retainedClusters: [],
+                rejectedBoxes: rejectedBoxes + retainedClusters.map(\.exactBounds),
+                confidence: 1.0
+            )
+        }
     }
 
     public let configuration: Configuration
@@ -571,7 +594,12 @@ public struct ContentBoxDetector: Sendable {
     /// rules; broken leaf edges are the rest). The band then grows over broken leaf edges (slivers at least 0.2 in
     /// tall and four times as tall as wide, within 0.15 in of it and in the same outer third) and is widened by
     /// 0.05 in on each side.
-    static func edgeStackBands(in bitmap: borrowing BinaryBitmap, splitSide: PageSide, scale: Double) -> [Rect2I] {
+    /// - Parameters:
+    ///   - bitmap: The cleaned page.
+    ///   - splitSide: Which half of the scan the page is, to pick its outer side.
+    ///   - scale: The page's resolution divided by 600 dpi.
+    /// - Returns: The bands, each as tall as the page.
+    public static func edgeStackBands(in bitmap: borrowing BinaryBitmap, splitSide: PageSide, scale: Double) -> [Rect2I] {
         let width = bitmap.width
         let height = bitmap.height
         let stripHeight = max(20, Int((300.0 * scale).rounded()))

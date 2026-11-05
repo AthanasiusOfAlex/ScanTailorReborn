@@ -279,6 +279,8 @@ public struct DimensionConsensus: Sendable {
         // Size-based kinds, per page.
         var kinds: [[DimensionOutlierKind]] = pages.map { page in
             if skipAutomatic { return (manual?.contains(page.pageIndex) == true) ? [.manual] : [] }
+            // A blank page has nothing to keep at its own size: it takes the book's canvas, whatever its scan.
+            guard page.contentBox != nil else { return [] }
             var found: [DimensionOutlierKind] = []
             let dw = (Double(page.pageSize.width) - medW) / medW
             let dh = (Double(page.pageSize.height) - medH) / medH
