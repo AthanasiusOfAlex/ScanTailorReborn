@@ -217,7 +217,7 @@ Phases 4–7 took the pipeline from flatbed scans to smartphone photographs of b
 - **Executable renamed** from `scantailor-cli` to `scantailor-reborn-cli`, to avoid a clash with the original Scan Tailor.
 - Tagged `v1.0.0`; Homebrew tap `AthanasiusOfAlex/scantailor-reborn` builds it from source.
 
-## 7. After v1.0.0
+## 7. v1.0.1
 
 - Documentation consolidated: the handoff notes, resume prompt and white paper are replaced by [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PIPELINE.md](docs/PIPELINE.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The old files remain in git history (up to commit `e861d06`).
 - **Fixed: number columns were cut off contents pages.** The edge-noise check dropped any low-ink column behind a gap, so the page numbers and section numbers of a table of contents (Anscombe 1963, pp. iii–ix) fell outside the content box. A stack of at least three glyph-sized clusters within 0.5 in of the text is now kept as a column of numbers. The same test also takes back such a column when it lies in the outer edge strip of a tightly cut scan, where border noise is set aside (Anscombe 1963, p. ix).
