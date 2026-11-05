@@ -37,7 +37,7 @@ scantailor-reborn-cli inspect d/book-layout-manifest.json --pages
 
 The manifest is named `<input-stem>-layout-manifest.json`. `inspect --pages` prints one line per output page (scan, side, tier, page size, text size, margins, skew, confidence, notes). `inspect --json` is the same data for programs. Contact sheets are `d/layout-sheet-NN.png` (red: canonical frame, green: text block, orange: outlier); `d/page-NNNN-diag.png` overlays exist for low-confidence pages. Look at the images, not only the numbers.
 
-Pages worth checking: those marked `LOW-CONF` or flagged in "Pages to check", pages whose margins differ from their neighbours', and any page marked as an outlier.
+Pages worth checking: those marked `LOW-CONF` or flagged in "Pages to check", pages whose margins differ from their neighbours', and any page marked as an outlier. On contents pages, indexes and pages with marginal numbers, check that the page-number and section-number columns lie inside the green box; if one is cut off, widen the page's `contentBox.rect` to take it in.
 
 If the manifest says `physicalScaleAmbiguous: true` (page would come out far larger than a book), **ask the user** for the page size instead of choosing one: octavo, trade paperback, A5, A4, or custom `<w>x<h>`; then pass `--page-size`.
 

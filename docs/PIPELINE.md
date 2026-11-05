@@ -132,6 +132,7 @@ A strip `--gutter-trim-width` wide (default 24 px) is then cut out along the sea
 - **Split-edge exclusion:** ignores the 4 % of a split page next to the cut.
 - **Edge noise:**
   - A column group cut off from the text by a gap of at least 1 % of the width, and holding less than 20 % of the ink, is dropped (page-edge textures, scanner noise).
+  - Except a column of numbers (`marginalGlyphColumn`): the page and section numbers of a table of contents, or marginal line numbers. It needs at least three clusters within 0.5 in of the text, each at most 0.3 in tall, 0.75 in wide and three times as tall as wide, stacked with blank space between them (filling at most 60 % of their height), in a column at most 0.75 in wide. The same test runs before this step on the clusters set aside so far (in the outer edge strip, or as margin smudges) that lie level with the body and are larger than specks, so a column of numbers on a tightly cut scan is kept too.
   - Columns inked over at least 70 % of the height are erased (rules, streaks).
 - **Page-edge stacks** (`edgeStackBands`): the edges of the following leaves, seen beside the outer margin. A band is erased before clustering when it meets all of these tests:
   - it lies in the outer third (left of a verso, right of a recto, either side of an unsplit page);
@@ -180,7 +181,7 @@ With it, Simpson 1968 lays out all 16 pages at 0.50/0.50/0.25/0.25 in.
   - Bands taller than 1.7 typical lines are split at near-empty rows.
   - Thin, wide, solid bands are rules and are folded into the line above.
   - Accent-sized bands, under 0.6 of the typical height, join the nearest line.
-  - Specks, smaller than half a core height and narrower than a core, are dropped.
+  - Specks, smaller than half a core height and narrower than two cores (dust, a pen dash), are dropped.
   - Each line records its bounds, baseline, core height and ink.
 - **Column analysis** ([`TextColumnAnalysis.swift`](../Sources/ScanTailorCore/Layout/TextColumnAnalysis.swift)): the same streak and isolated-group tests as §8.
 - **Candidates.** A top line is a header candidate when:

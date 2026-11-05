@@ -112,6 +112,17 @@ struct RunningHeaderCalibrationTests {
         #expect(Self.profile(rects, detector: kept).lines.count > 25, "specks are lines when the filter is off")
     }
 
+    @Test("A short dash between the header and the body is a speck, so the header still stands apart")
+    func dashBelowHeader() throws {
+        var rects = Self.plainPage()
+        // A pen dash or scratch: wider than the core height, but far thinner than any line of type.
+        rects.append(Rect2I(minX: 120, minY: 160, maxX: 150, maxY: 164))
+        let p = Self.profile(rects)
+        #expect(p.lines.count == 25)
+        #expect(abs(p.lines[0].baselineY - 120) <= 2)
+        #expect(abs(p.lines[1].baselineY - 220) <= 2)
+    }
+
     @Test("A narrow blob stacked on the header belongs to the header line")
     func stackedBlob() throws {
         var rects = Self.plainPage()
@@ -206,5 +217,49 @@ struct RunningHeaderCalibrationTests {
         off.edgeNoiseIsolationGapFraction = 0
         let untrimmed = try #require(ContentBoxDetector(configuration: off).detect(in: bitmap, dpi: 600).contentBox)
         #expect(untrimmed.minX < 400, "without the check the texture widens the box: \(untrimmed)")
+    }
+
+    @Test("ContentBoxDetector keeps the section and page number columns of a table of contents")
+    func contentBoxKeepsNumberColumns() throws {
+        var bitmap = BinaryBitmap(width: 1400, height: 1800, initialBlack: false)
+        func fill(_ r: Rect2I) {
+            for y in r.minY..<r.maxY { for x in r.minX..<r.maxX { bitmap[x, y] = true } }
+        }
+        for i in 0..<36 {
+            for r in Self.lineRects(baseline: 260 + i * 42, x0: 480 + (i * 5) % 14, x1: 1200, core: 24) { fill(r) }
+        }
+        // Section numbers 0.17 in left of the text and page numbers 0.17 in right of it, one per entry of six lines.
+        for entry in 0..<6 {
+            let top = 236 + entry * 252
+            fill(Rect2I(minX: 340, minY: top, maxX: 380, maxY: top + 30))
+            fill(Rect2I(minX: 1300, minY: top + 210, maxX: 1350, maxY: top + 240))
+        }
+
+        let config = ContentBoxDetector.Configuration(cleanBordersFirst: false, outerEdgeMarginFraction: 0.02, edgeNoiseIsolationGapFraction: 0.01)
+        let box = try #require(ContentBoxDetector(configuration: config).detect(in: bitmap, dpi: 600).contentBox)
+        #expect(box.minX <= 340 && box.maxX >= 1350, "both number columns are content: \(box)")
+    }
+
+    /// A tightly cut contents page (Anscombe 1963, p. ix): the section numbers lie in the outer edge strip, where
+    /// border noise is set aside, and must still be kept as a column of numbers. Specks beside them are not kept.
+    @Test("Content box keeps a number column that lies in the outer edge strip")
+    func contentBoxKeepsNumberColumnInEdgeStrip() throws {
+        var bitmap = BinaryBitmap(width: 1400, height: 1800, initialBlack: false)
+        func fill(_ r: Rect2I) {
+            for y in r.minY..<r.maxY { for x in r.minX..<r.maxX { bitmap[x, y] = true } }
+        }
+        for i in 0..<36 {
+            for r in Self.lineRects(baseline: 260 + i * 42, x0: 200 + (i * 5) % 14, x1: 1200, core: 24) { fill(r) }
+        }
+        for entry in 0..<6 {
+            let top = 236 + entry * 252
+            fill(Rect2I(minX: 20, minY: top, maxX: 60, maxY: top + 30))
+            fill(Rect2I(minX: 30, minY: top + 150, maxX: 36, maxY: top + 156))
+        }
+
+        let config = ContentBoxDetector.Configuration(cleanBordersFirst: false, outerEdgeMarginFraction: 0.05, edgeNoiseIsolationGapFraction: 0.01)
+        let box = try #require(ContentBoxDetector(configuration: config).detect(in: bitmap, dpi: 600).contentBox)
+        #expect(box.minX <= 20, "the section numbers are content: \(box)")
+        #expect(box.maxY <= 1760, "the specks below the last number are not: \(box)")
     }
 }

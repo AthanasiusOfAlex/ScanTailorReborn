@@ -187,7 +187,8 @@ public struct RunningHeaderDetector: Sendable {
         /// Columns separated from the main text block by an empty gap of at least this fraction of the
         /// profiled width are ignored when their ink is small (page-edge textures, scanner noise); `0` disables.
         public var minColumnIsolationGapFraction: Double
-        /// Lines smaller than this fraction of the typical core height (in both height and width) are specks, not text.
+        /// Lines less tall than this fraction of the typical core height, and narrower than two core heights, are
+        /// specks, not text.
         public var speckFraction: Double
 
         public init(
@@ -845,8 +846,10 @@ public struct RunningHeaderDetector: Sendable {
         guard fraction > 0, lines.count > 1 else { return lines }
         let wide = lines.filter { $0.bounds.width * 5 >= areaWidth * 2 }
         guard let typicalCore = median((wide.isEmpty ? lines : wide).map { Double($0.coreHeight) }), typicalCore > 4 else { return lines }
+        // Thinner than `fraction` of the core and narrower than two cores: dust, a pen dash, a scratch. Even a lone
+        // hyphen or short word on a line of its own stands taller than that.
         let kept = lines.filter {
-            !(Double($0.bounds.height) < fraction * typicalCore && Double($0.bounds.width) < typicalCore)
+            !(Double($0.bounds.height) < fraction * typicalCore && Double($0.bounds.width) < 2 * typicalCore)
         }
         return kept.isEmpty ? lines : kept
     }

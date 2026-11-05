@@ -529,6 +529,23 @@ public struct ContentBoxDetector: Sendable {
             }
         }
 
+        // A column of section or page numbers beside the text can sit in the outer edge strip of a tightly cut
+        // scan, where it was set aside above as border noise: take it back when it is one.
+        let spareGlyphs = allClusters.filter { cluster in
+            let box = cluster.exactBounds
+            return !retainedAll.contains(cluster)
+                && max(box.width, box.height) >= minSpeckSpan
+                && cluster.foregroundPixels >= max(4, minClusterPx / 4)
+                && box.minY >= mainBodyBox.minY - maxVertGap && box.maxY <= mainBodyBox.maxY + maxVertGap
+        }
+        let rescued = Self.marginalGlyphColumn(spareGlyphs.filter { $0.exactBounds.maxX <= mainBodyBox.minX }, besideX: mainBodyBox.minX, scale: scale)
+            + Self.marginalGlyphColumn(spareGlyphs.filter { $0.exactBounds.minX >= mainBodyBox.maxX }, besideX: mainBodyBox.maxX, scale: scale)
+        if !rescued.isEmpty {
+            let rescuedBoxes = Set(rescued.map { [$0.exactBounds.minX, $0.exactBounds.minY, $0.exactBounds.maxX, $0.exactBounds.maxY] })
+            rejectedBoxes.removeAll { rescuedBoxes.contains([$0.minX, $0.minY, $0.maxX, $0.maxY]) }
+            retainedAll += rescued
+        }
+
         var finalContentBox = retainedAll[0].exactBounds
         for c in retainedAll.dropFirst() {
             finalContentBox = finalContentBox.union(c.exactBounds)
@@ -542,7 +559,13 @@ public struct ContentBoxDetector: Sendable {
                 counts: counts, areaHeight: area.height, gapFraction: configuration.edgeNoiseIsolationGapFraction
             ) {
                 let keepRange = (area.minX + extent.lowerBound)..<(area.minX + extent.upperBound)
-                let kept = retainedAll.filter { $0.exactBounds.maxX > keepRange.lowerBound && $0.exactBounds.minX < keepRange.upperBound }
+                var kept = retainedAll.filter { $0.exactBounds.maxX > keepRange.lowerBound && $0.exactBounds.minX < keepRange.upperBound }
+                // A column of page numbers or section numbers (a table of contents, marginal numbering) carries
+                // little ink behind a gap too, but it is a stack of separate glyph-sized clusters beside the text,
+                // not a texture: keep it.
+                let dropped = retainedAll.filter { !kept.contains($0) }
+                kept += Self.marginalGlyphColumn(dropped.filter { $0.exactBounds.maxX <= keepRange.lowerBound }, besideX: keepRange.lowerBound, scale: scale)
+                kept += Self.marginalGlyphColumn(dropped.filter { $0.exactBounds.minX >= keepRange.upperBound }, besideX: keepRange.upperBound, scale: scale)
                 if !kept.isEmpty && kept.count < retainedAll.count {
                     for cluster in retainedAll where !kept.contains(cluster) {
                         rejectedBoxes.append(cluster.exactBounds)
@@ -647,6 +670,34 @@ public struct ContentBoxDetector: Sendable {
             }
             return Rect2I(minX: max(0, band.minX - pad), minY: 0, maxX: min(width, band.maxX + pad), maxY: height)
         }
+    }
+
+    /// The clusters on one side of the text that form a column of numbers: the page numbers or section numbers
+    /// of a table of contents, or marginal line and paragraph numbers.
+    ///
+    /// Only clusters within 0.5 in of the text count. Each must be glyph-sized (at most 0.3 in tall, 0.75 in
+    /// wide, and no more than three times as tall as wide, so a `§` passes but a leaf edge does not). There must
+    /// be at least three, stacked one above another with blank space between them (together they fill at most
+    /// 60 % of the height they span), and the column must be at most 0.75 in wide.
+    /// - Parameters:
+    ///   - clusters: Clusters on one side of the text, all left or all right of it.
+    ///   - besideX: The text's edge on that side.
+    ///   - scale: The page's resolution divided by 600 dpi.
+    /// - Returns: The column's clusters, or nothing when they do not form one.
+    static func marginalGlyphColumn(_ clusters: [Cluster], besideX: Int, scale: Double) -> [Cluster] {
+        let maxGap = Int((300.0 * scale).rounded())
+        let maxHeight = Int((180.0 * scale).rounded())
+        let maxWidth = Int((450.0 * scale).rounded())
+        let column = clusters.filter { cluster in
+            let box = cluster.exactBounds
+            let gap = box.maxX <= besideX ? besideX - box.maxX : box.minX - besideX
+            return gap <= maxGap && box.height <= maxHeight && box.width <= maxWidth && box.height <= 3 * box.width
+        }
+        guard column.count >= 3, let first = column.first else { return [] }
+        let span = column.dropFirst().reduce(first.exactBounds) { $0.union($1.exactBounds) }
+        let filledRows = column.reduce(0) { $0 + $1.exactBounds.height }
+        guard span.width <= maxWidth, filledRows * 10 <= span.height * 6 else { return [] }
+        return column
     }
 
     /// Box of the text block: clusters of `bitmap` closed with a `brickWidth × brickHeight` brick, grown from the
