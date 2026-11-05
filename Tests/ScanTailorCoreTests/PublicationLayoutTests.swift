@@ -130,6 +130,37 @@ struct PublicationLayoutTests {
         #expect(endingPlan.destinationOrigin == Point2I(x: Self.side, y: Self.topBottom))
     }
 
+    @Test("A narrower headerless opening that runs to the foot sits on the frame bottom too, unless its tier was forced (fix 4)")
+    func narrowOpeningSitsOnBottom() {
+        // A lectio opening set narrower than the body, ending 60 px above the foot of the scan's text block.
+        let blockBottom = Self.blockTop + Self.blockHeight
+        let opening = Rect2I(x: Self.rectoX + 130, y: blockBottom - 60 - 1300, width: 700, height: 1300)
+        // A tall block that starts near the head stays where it is, even though it also comes near the foot.
+        let tall = Rect2I(x: Self.versoX + 130, y: Self.blockTop + 40, width: 700, height: Self.blockHeight - 120)
+        // A short opening whose text stops 200 px (more than 1/4 in) above the foot keeps its sink.
+        let short = Rect2I(x: Self.rectoX + 130, y: Self.blockTop + 600, width: 700, height: Self.blockHeight - 800)
+        let pages = Self.bodyPages() + [Self.page(6, opening), Self.page(7, tall), Self.page(8, short)]
+        let model = MarginHarmonizer().harmonizeBook(pages: pages)
+
+        let openingPlan = model.pagePlans[6]
+        #expect(openingPlan.tier == .standaloneFloating)
+        #expect(openingPlan.verticalAnchorEdge == .bottom)
+        #expect(Self.margins(openingPlan) == (Self.side + 130, Self.side + 130, Self.topBottom + Self.blockHeight - 1300, Self.topBottom))
+
+        let tallPlan = model.pagePlans[7]
+        #expect(tallPlan.verticalAnchorEdge == nil)
+        #expect(tallPlan.destinationOrigin.y == Self.topBottom + 40)
+
+        let shortPlan = model.pagePlans[8]
+        #expect(shortPlan.verticalAnchorEdge == nil)
+        #expect(shortPlan.destinationOrigin.y == Self.topBottom + 600)
+
+        // Forcing the tier in the adjustments file keeps the scan's offset.
+        let forced = MarginHarmonizer().harmonizeBook(pages: pages, forcedTiers: [6: .standaloneFloating]).pagePlans[6]
+        #expect(forced.verticalAnchorEdge == nil)
+        #expect(forced.destinationOrigin.y == Self.topBottom + Self.blockHeight - 60 - 1300)
+    }
+
     @Test("A floating page keeps its offset from the text block: centered text stays centered, side text stays to the side")
     func floatingPagesKeepTheirOffset() {
         // Recto title, centered on the scan's text block, 400 px below its top.

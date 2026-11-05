@@ -13,7 +13,8 @@ import ScanTailorContracts
 ///   chapter openings that reach the foot of the text block sit on the frame bottom; other full-width
 ///   blocks keep their natural height.
 /// - **Tier 3 (`standaloneFloating`)**: title pages, dedications, dividers and ornaments keep their
-///   offset from the scan's text block, and stay centered if they were centered.
+///   offset from the scan's text block, and stay centered if they were centered. A narrower headerless
+///   opening that reaches the foot of the text block sits on the frame bottom, like a full-width one.
 public struct MarginHarmonizer: Sendable {
     /// Logical book page side for recto/verso margin symmetry.
     public enum PageSide: String, Sendable, Equatable, Codable {
@@ -32,7 +33,8 @@ public struct MarginHarmonizer: Sendable {
         case standaloneFloating
     }
 
-    /// Which vertical edge of a Tier 2 (`edgeAnchoredPartial`) page was pinned to the canonical frame.
+    /// Which vertical edge of a Tier 2 (`edgeAnchoredPartial`) page, or of a Tier 3 opening, was pinned to the
+    /// canonical frame.
     public enum VerticalAnchorEdge: String, Sendable, Equatable, Codable {
         /// The content top sits on the frame top (chapter ending: free space below).
         case top
@@ -184,8 +186,9 @@ public struct MarginHarmonizer: Sendable {
         public var destinationOrigin: Point2I
         /// Target canonical output canvas dimensions in pixels (at `dpi`, typically 600 DPI).
         public var canvasSize: Size2I
-        /// For Tier 2 pages, which vertical edge was pinned to the canonical frame (`nil` for
-        /// Tiers 1 and 3 and for plans written before Substep 6.1.2).
+        /// For Tier 2 pages, which vertical edge was pinned to the canonical frame; for Tier 3 pages, `.bottom`
+        /// when a narrow opening sits on the frame bottom (`nil` for Tier 1, for other Tier 3 pages and for plans
+        /// written before Substep 6.1.2).
         public var verticalAnchorEdge: VerticalAnchorEdge?
         /// For dimensional outliers (Substep 6.2.1), the page size this page should get on its own canvas
         /// (`nil` for canonical pages and for plans written before 6.2.1).
@@ -547,6 +550,10 @@ public struct MarginHarmonizer: Sendable {
             let naturalY = Self.clampOrigin(
                 targetFrame.minY + (box.minY - source.minY), span: box.height, canvasSpan: canvasSize.height
             )
+            let topDistance = abs(box.minY - source.minY)
+            let bottomDistance = abs(box.maxY - source.maxY)
+            let reachesFoot = bottomDistance <= topDistance && bottomDistance <= edgeAnchorTolerance
+            let bottomY = Self.clampOrigin(targetFrame.maxY - box.height, span: box.height, canvasSpan: canvasSize.height)
             let destOrigin: Point2I
             var anchorEdge: VerticalAnchorEdge? = nil
 
@@ -558,15 +565,12 @@ public struct MarginHarmonizer: Sendable {
                 // Tier 2 — partial page. A header page hangs from the top; otherwise a block that reaches the foot of
                 // the text block (a chapter opening) sits on the frame bottom, and one that starts at its head (a
                 // chapter ending) hangs from the top. Anything else keeps its natural height.
-                let topDistance = abs(box.minY - source.minY)
-                let bottomDistance = abs(box.maxY - source.maxY)
                 if hasHeader {
                     anchorEdge = .top
                     destOrigin = Point2I(x: centeredX, y: topY)
-                } else if bottomDistance <= topDistance && bottomDistance <= edgeAnchorTolerance {
+                } else if reachesFoot {
                     anchorEdge = .bottom
-                    let anchoredY = Self.clampOrigin(targetFrame.maxY - box.height, span: box.height, canvasSpan: canvasSize.height)
-                    destOrigin = Point2I(x: centeredX, y: anchoredY)
+                    destOrigin = Point2I(x: centeredX, y: bottomY)
                 } else if topDistance <= edgeAnchorTolerance {
                     anchorEdge = .top
                     destOrigin = Point2I(x: centeredX, y: topY)
@@ -584,7 +588,16 @@ public struct MarginHarmonizer: Sendable {
                         targetFrame.minX + targetFrame.width / 2 + offsetFromCenter - box.width / 2,
                         span: box.width, canvasSpan: canvasSize.width
                     )
-                destOrigin = Point2I(x: x, y: naturalY)
+                // A headerless opening narrower than the text block (a lectio or section opening set in a narrower
+                // measure) that runs to its foot sits on the frame bottom, like a full-width chapter opening
+                // (Substep 7.1.2, fix 4). The test is stricter than Tier 2's: the block must end within 1/4 in of
+                // the foot and drop at least twice as far from the head, so a short opening, a title page or a
+                // header page whose header went undetected keeps its offset. A forced tier keeps it too.
+                let opensAtFoot = forcedTier == nil && !isOutlier
+                    && bottomDistance <= referenceDPI / 4 && topDistance >= 2 * bottomDistance
+                    && heightRatio >= configuration.minPartialHeightFraction && box.height < targetFrame.height
+                if opensAtFoot { anchorEdge = .bottom }
+                destOrigin = Point2I(x: x, y: opensAtFoot ? bottomY : naturalY)
             }
 
             plans.append(
