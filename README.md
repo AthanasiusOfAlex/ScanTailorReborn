@@ -29,8 +29,11 @@ It is an independent project inspired by Scan Tailor, not a fork of it. Its exec
 
 ```bash
 brew tap AthanasiusOfAlex/scantailor-reborn
+brew trust AthanasiusOfAlex/scantailor-reborn   # recent Homebrew refuses untrusted taps
 brew install scantailor-reborn
 ```
+
+This builds from source (about a minute, Xcode required) and installs `scantailor-reborn-cli`.
 
 ### Build from source
 

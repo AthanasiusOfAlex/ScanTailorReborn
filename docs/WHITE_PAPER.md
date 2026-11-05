@@ -387,6 +387,7 @@ To advance **ScanTailorReborn** from its current v2.0 baseline to complete **v1.
   - *Effort Level*: **Low**
 - **Substep 7.2.3: Homebrew Tap**
   - *Description*: Publish the `AthanasiusOfAlex/homebrew-scantailor-reborn` tap with a `scantailor-reborn` formula that builds the `v1.0.0` tarball (`depends_on "tesseract"`, `xcode: :build`, `macos: :sonoma`); verify with `brew install --build-from-source` and `brew test`.
+  - *Status*: **Completed.** Tap pushed; build (55 s), `brew test` and `brew audit --strict --new` pass. Recent Homebrew needs `brew trust` on third-party taps.
   - *Proposed Model*: **Sonnet**
   - *Effort Level*: **Medium**
 

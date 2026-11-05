@@ -301,5 +301,5 @@ We are resuming ScanTailorReborn after Substep 7.2.2's CHANGELOG and rename.
 
 1. Review `docs/HANDOFF.md` and `docs/WHITE_PAPER.md` Phase 7.
 2. If the rename/CHANGELOG commit is pushed, ask before creating and pushing the `v1.0.0` tag.
-3. Then 7.2.3 (Homebrew tap) needs the pushed tag. The executable is `scantailor-reborn-cli`.
+3. 7.2.3 (Homebrew tap) is done: `v1.0.0` is tagged and the tap formula verified. The executable is `scantailor-reborn-cli`.
 ```
