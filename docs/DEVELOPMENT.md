@@ -58,13 +58,15 @@ When a stage misbehaves on a book, run `process … --diagnostics-dir d/ --all-d
 
 ## Agent skill and plugin
 
-The canonical skill is [plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md](../plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md). After editing it, run [`scripts/sync-skill.sh`](../scripts/sync-skill.sh) to mirror it into `.claude/skills/` and `.agents/skills/`. Both mirrors are tracked, but everything else in those folders is git-ignored. The plugin marketplace is [.claude-plugin/marketplace.json](../.claude-plugin/marketplace.json).
+The canonical skill is [plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md](../plugins/scantailor-reborn/skills/scantailor-reborn/SKILL.md). After editing it, run [`scripts/sync-skill.sh`](../scripts/sync-skill.sh) to mirror it into `.claude/skills/` and `.agents/skills/`. `.claude/skills/` is for Claude Code and `.agents/skills/` is for Antigravity. Both mirrors are tracked, but everything else in those folders is git-ignored. `scripts/test.sh` runs `scripts/sync-skill.sh --check` first and fails if a mirror differs from the canonical file. The plugin marketplace is [.claude-plugin/marketplace.json](../.claude-plugin/marketplace.json).
 
 When the CLI's options change, update `usageText`, the README's option tables and the skill together. Every flag in `--help` must appear in the README.
 
+The skill ships in this repository, not a separate one, so that the tool and its documentation of the tool are tagged together. Its plugin version (`version` in [plugin.json](../plugins/scantailor-reborn/.claude-plugin/plugin.json)) always equals the release version.
+
 ## Releasing
 
-1. Update [CHANGELOG.md](../CHANGELOG.md), then commit and push.
+1. Update [CHANGELOG.md](../CHANGELOG.md), noting any change to the skill. Set `version` in [plugin.json](../plugins/scantailor-reborn/.claude-plugin/plugin.json) to the new version, and run `scripts/sync-skill.sh` if the skill changed. Then commit and push.
 2. Tag the release and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. In the tap repository [`AthanasiusOfAlex/homebrew-scantailor-reborn`](https://github.com/AthanasiusOfAlex/homebrew-scantailor-reborn), update `Formula/scantailor-reborn.rb`:
    - Set `url` to the new tag's tarball.

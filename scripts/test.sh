@@ -6,6 +6,7 @@
 # `-Xswiftc -enable-testing` lets release tests use @testable imports.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+sh scripts/sync-skill.sh --check
 mode="${1:-fast}"
 shift || true
 filter=()

@@ -35,6 +35,14 @@ brew install scantailor-reborn
 
 This builds from source (about a minute, Xcode required) and installs `scantailor-reborn-cli`.
 
+### Starting from a clean Mac
+
+1. Install Xcode 16 or later from the App Store, open it once to accept the licence, then run `xcode-select --install` if the command-line tools are missing.
+2. Install [Homebrew](https://brew.sh).
+3. Run the three Homebrew commands above. Tesseract is installed for you. For more OCR languages, add `brew install tesseract-lang`.
+4. Check it: `scantailor-reborn-cli --help`.
+5. Optional: [install the agent skill](#using-it-with-an-ai-agent).
+
 ### Build from source
 
 ```bash
@@ -270,14 +278,20 @@ scantailor-reborn-cli process photos.pdf -o clean.pdf --input-dpi 300
 
 ## Using it with an AI agent
 
-The repository includes an agent skill that teaches an agent to drive the loop above: plan, inspect, write an adjustments file, repeat. It is installed in this repo under `.claude/skills/scantailor-reborn` (and mirrored in `.agents/skills/`), and is also packaged as a Claude Code plugin:
+The repository includes an agent skill that teaches an agent to drive the loop above: plan, inspect, write an adjustments file, repeat. The skill is only instructions. It needs `scantailor-reborn-cli` on your `PATH` (see [Installation](#installation)), and tells the agent how to install it if it is missing. The skill's version matches the tool's: install the skill from the same release you build the tool from, because the skill documents that release's options.
+
+**Claude Code** (any folder, nothing to clone):
 
 ```
 /plugin marketplace add AthanasiusOfAlex/ScanTailorReborn
 /plugin install scantailor-reborn@scantailor-reborn
 ```
 
-The skill needs `scantailor-reborn-cli` on your `PATH` and says how to install it if it is missing.
+Update later with `/plugin marketplace update scantailor-reborn`.
+
+**Claude Code or Antigravity, working inside a clone of this repository**: nothing to install. Claude Code reads `.claude/skills/scantailor-reborn` and Antigravity reads `.agents/skills/scantailor-reborn` when you open the clone.
+
+**Any other setup**: copy [`plugins/scantailor-reborn/skills/scantailor-reborn/`](plugins/scantailor-reborn/skills/scantailor-reborn/) into your agent's skills folder. For a personal Claude Code skill that is `~/.claude/skills/`.
 
 ---
 
